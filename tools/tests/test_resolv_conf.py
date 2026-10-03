@@ -43,6 +43,17 @@ def test_the_default_networks_servers_are_written(monkeypatch, tmp_path):
     assert path.read_text() == f'{module.RESOLV_MARKER}\nnameserver 192.168.5.1\n'
     assert oct(path.stat().st_mode & 0o777) == '0o644'
     assert module.sync_resolv_conf(snapshot(WIFI)) == 'unchanged'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['resolv.conf']   # no temporary file left
+
+
+# covers: desktop.network/E6
+def test_a_leftover_link_beside_the_file_is_never_written_through(monkeypatch, tmp_path):
+    module, path = module_with(monkeypatch, tmp_path)
+    victim = tmp_path / 'victim'
+    victim.write_text('keep\n')
+    (tmp_path / '.resolv.conf.rungic').symlink_to(victim)          # the old fixed temporary name
+    assert module.sync_resolv_conf(snapshot(WIFI)) == 'written'
+    assert victim.read_text() == 'keep\n' and 'nameserver 192.168.5.1' in path.read_text()
 
 
 # covers: desktop.network/E6

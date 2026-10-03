@@ -14,6 +14,7 @@ import re
 import signal
 import socket
 import struct
+import tempfile
 import threading
 import time
 import uuid
@@ -115,19 +116,23 @@ def sync_resolv_conf(snapshot, path=None):
     except OSError:
         pass
     folder = os.path.dirname(path) or '.'
-    temporary = os.path.join(folder, '.resolv.conf.rungic')
+    temporary = None
     try:
-        with open(temporary, 'w', encoding='utf-8') as stream:
+        # A new, exclusively created file of a random name beside the target: a concurrent start or
+        # a leftover file or link of a fixed name cannot be written through.
+        descriptor, temporary = tempfile.mkstemp(prefix='.resolv.conf.', dir=folder)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
             stream.write(text)
             stream.flush()
+            os.fchmod(stream.fileno(), 0o644)
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o644)
         os.replace(temporary, path)
     except OSError:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
         return 'failed'
     return 'written'
 
