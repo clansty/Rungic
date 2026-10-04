@@ -26,20 +26,21 @@ X-Rungic-Tests: L3:session.ready
 X-Rungic-Docs: docs/72
 Origin: vendor
 ---
- src/backends/android/android_backend.cpp     |  83 +++++++++++++---
- src/backends/android/android_backend.h       |   6 ++
- src/backends/wayland/wayland_backend.cpp     |  96 +++++++++++++++---
- src/backends/wayland/wayland_backend.h       |  12 +++
- src/backends/wayland/wayland_display.cpp     |  28 +++++-
- src/backends/wayland/wayland_egl_backend.cpp |   6 ++
- src/backends/wayland/wayland_layer.cpp       |  34 ++++++-
- src/backends/wayland/wayland_layer.h         |   4 +
- src/backends/wayland/wayland_output.cpp      | 143 ++++++++++++++++++++++-----
- src/backends/wayland/wayland_output.h        |  12 +++
- 10 files changed, 365 insertions(+), 59 deletions(-)
+ src/backends/android/android_backend.cpp          |  99 ++++++++++++---
+ src/backends/android/android_backend.h            |   6 +
+ src/backends/wayland/wayland_backend.cpp          | 106 ++++++++++++++--
+ src/backends/wayland/wayland_backend.h            |  12 ++
+ src/backends/wayland/wayland_display.cpp          |  28 ++++-
+ src/backends/wayland/wayland_egl_backend.cpp      |  10 +-
+ src/backends/wayland/wayland_layer.cpp            |  34 ++++-
+ src/backends/wayland/wayland_layer.h              |   4 +
+ src/backends/wayland/wayland_output.cpp           | 144 ++++++++++++++++++----
+ src/backends/wayland/wayland_output.h             |  12 ++
+ src/backends/wayland/wayland_qpainter_backend.cpp |   4 +-
+ 11 files changed, 397 insertions(+), 62 deletions(-)
 
 diff --git a/src/backends/android/android_backend.cpp b/src/backends/android/android_backend.cpp
-index 571b49d..418f291 100644
+index 571b49d..973357b 100644
 --- a/src/backends/android/android_backend.cpp
 +++ b/src/backends/android/android_backend.cpp
 @@ -40,6 +40,8 @@ AndroidBackend::AndroidBackend(const Wayland::WaylandBackendOptions &options, co
@@ -51,7 +52,7 @@ index 571b49d..418f291 100644
      // Input exists once the workspace does.
      connect(kwinApp(), &Application::workspaceCreated, this, [this]() {
          connect(input(), &InputRedirection::idleInhibitedChanged, this, &AndroidBackend::setIdleInhibited);
-@@ -213,27 +215,76 @@ Wayland::WaylandOutput *AndroidBackend::createOutputObject(const QString &name,
+@@ -213,27 +215,92 @@ Wayland::WaylandOutput *AndroidBackend::createOutputObject(const QString &name,
  
  void AndroidBackend::configureDisplay(Wayland::WaylandDisplay *display)
  {
@@ -95,19 +96,35 @@ index 571b49d..418f291 100644
 +    qCWarning(KWIN_WAYLAND_BACKEND) << "Android host connection lost; keeping the session and waiting for the host";
 +    m_reconnecting = true;
 +    m_initialized = false;
-+    // Everything bound on the host belongs to the dead connection (its proxies are left to it).
++    // Everything bound on the dead connection is destroyed now, so that the connection itself can go
++    // once the host is back (connectHost): its socket and the event thread's pipe would stay open.
 +    m_textInput.reset();
-+    m_textInputManager = nullptr;
-+    m_idleInhibitor = nullptr;
-+    m_idleInhibitManager = nullptr;
-+    m_queue = nullptr;
-+    // A cast display was a host output: it goes with the host. The phone's output stays
-+    // (disconnectHost) and is bound to the next host window (reconnectHost).
++    if (m_textInputManager) {
++        zwp_text_input_manager_v3_destroy(m_textInputManager);
++        m_textInputManager = nullptr;
++    }
++    if (m_idleInhibitor) {
++        zwp_idle_inhibitor_v1_destroy(m_idleInhibitor);
++        m_idleInhibitor = nullptr;
++    }
++    if (m_idleInhibitManager) {
++        zwp_idle_inhibit_manager_v1_destroy(m_idleInhibitManager);
++        m_idleInhibitManager = nullptr;
++    }
++    if (m_queue) {
++        wl_event_queue_destroy(m_queue);
++        m_queue = nullptr;
++    }
++    // A cast display was a host output: it goes with the host. Its host window goes now, even if
++    // the output object is kept a while longer. The phone's output stays (disconnectHost) and is
++    // bound to the next host window (reconnectHost).
 +    for (Wayland::WaylandOutput *output : std::as_const(m_castOutputs)) {
 +        qCInfo(KWIN_WAYLAND_BACKEND) << "Cast output removed with the host" << output->name();
++        output->unbindHost();
 +        removeOutput(output);
 +    }
 +    m_castOutputs.clear();
++    qDeleteAll(m_hostOutputs);
 +    m_hostOutputs.clear();
 +    disconnectHost();
 +    m_reconnectTimer.start();
@@ -176,10 +193,31 @@ index 380c88c..0b6b330 100644
      std::unique_ptr<HostTextInput> m_textInput;
  };
 diff --git a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
-index 713bac0..b3423ec 100644
+index 713bac0..4ed2d06 100644
 --- a/src/backends/wayland/wayland_backend.cpp
 +++ b/src/backends/wayland/wayland_backend.cpp
-@@ -326,8 +326,19 @@ WaylandInputBackend::WaylandInputBackend(WaylandBackend *backend, QObject *paren
+@@ -56,6 +56,11 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Keyboard *keyboard, Way
+     : m_seat(seat)
+     , m_keyboard(keyboard)
+ {
++    // The host's keymap is not used (KWin has its own), but its file descriptor is the receiver's
++    // to close: a keyboard of every host connection (connectHost) would leave one open.
++    connect(keyboard, &Keyboard::keymapChanged, this, [](int fd, quint32 size) {
++        close(fd);
++    });
+     connect(keyboard, &Keyboard::left, this, [this](quint32 time) {
+         for (quint32 key : std::as_const(m_pressedKeys)) {
+             Q_EMIT keyChanged(key, KeyboardKeyState::Released, std::chrono::milliseconds(time), this);
+@@ -97,7 +102,7 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Pointer *pointer, Wayla
+         const auto outputs = m_seat->backend()->outputs();
+         for (BackendOutput *output : outputs) {
+             WaylandOutput *waylandOutput = static_cast<WaylandOutput *>(output);
+-            if (waylandOutput->cursor()->pointer()) {
++            if (waylandOutput->cursor() && waylandOutput->cursor()->pointer()) {
+                 waylandOutput->cursor()->setPointer(nullptr);
+             }
+         }
+@@ -326,8 +331,19 @@ WaylandInputBackend::WaylandInputBackend(WaylandBackend *backend, QObject *paren
  }
  
  void WaylandInputBackend::initialize()
@@ -199,7 +237,7 @@ index 713bac0..b3423ec 100644
      if (seat->relativePointerDevice()) {
          Q_EMIT deviceAdded(seat->relativePointerDevice());
      }
-@@ -471,13 +482,39 @@ WaylandBackend::~WaylandBackend()
+@@ -471,13 +487,39 @@ WaylandBackend::~WaylandBackend()
  
  bool WaylandBackend::initialize()
  {
@@ -231,8 +269,8 @@ index 713bac0..b3423ec 100644
 +    if (!display->initialize(m_options.socketName)) {
          return false;
      }
-+    // A connection lost before (disconnectHost) stays allocated: outputs and buffers of it may
-+    // still be released, and their proxies must not outlive their display.
++    // A connection lost before (disconnectHost) stays allocated until the outputs are bound to the
++    // new one: proxies must not outlive their display.
 +    if (m_display) {
 +        m_lostDisplays.push_back(std::move(m_display));
 +    }
@@ -243,7 +281,7 @@ index 713bac0..b3423ec 100644
          const QString path = renderDevicePath();
          m_drmDevice = DrmDevice::open(path);
          if (!m_drmDevice) {
-@@ -487,22 +524,57 @@ bool WaylandBackend::initialize()
+@@ -487,22 +529,60 @@ bool WaylandBackend::initialize()
          }
      }
  
@@ -262,6 +300,9 @@ index 713bac0..b3423ec 100644
      QObject::connect(dispatcher, &QAbstractEventDispatcher::aboutToBlock, m_display.get(), &WaylandDisplay::flush);
      QObject::connect(dispatcher, &QAbstractEventDispatcher::awake, m_display.get(), &WaylandDisplay::flush);
 +    Q_EMIT seatChanged();
++    // Nothing is bound on the lost connections any more: the outputs are on the new one, and seat,
++    // imported buffers and what a derived backend bound went with the host (disconnectHost).
++    m_lostDisplays.clear();
 +    return true;
 +}
  
@@ -432,7 +473,7 @@ index a87e830..3d7410d 100644
  }
  
 diff --git a/src/backends/wayland/wayland_egl_backend.cpp b/src/backends/wayland/wayland_egl_backend.cpp
-index 7339691..7791150 100644
+index 7339691..0edb816 100644
 --- a/src/backends/wayland/wayland_egl_backend.cpp
 +++ b/src/backends/wayland/wayland_egl_backend.cpp
 @@ -168,6 +168,9 @@ QHash<uint32_t, QList<uint64_t>> WaylandEglLayer::supportedDrmFormats() const
@@ -445,7 +486,18 @@ index 7339691..7791150 100644
      m_buffer.reset();
      m_swapchain.reset();
  }
-@@ -257,6 +260,9 @@ QHash<uint32_t, QList<uint64_t>> WaylandEglCursorLayer::supportedDrmFormats() co
+@@ -238,7 +241,9 @@ bool WaylandEglCursorLayer::doEndFrame(const Region &renderedDeviceRegion, const
+     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
+     Q_ASSERT(buffer);
+ 
+-    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint());
++    if (WaylandCursor *cursor = static_cast<WaylandOutput *>(m_output.get())->cursor()) {
++        cursor->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint());
++    }
+ 
+     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+@@ -257,6 +262,9 @@ QHash<uint32_t, QList<uint64_t>> WaylandEglCursorLayer::supportedDrmFormats() co
  
  void WaylandEglCursorLayer::releaseBuffers()
  {
@@ -553,7 +605,7 @@ index 6ac14d6..3df8b57 100644
      std::unique_ptr<KWayland::Client::Surface> m_surface;
      std::unique_ptr<KWayland::Client::SubSurface> m_subSurface;
 diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
-index a9d2b0c..30881b2 100644
+index a9d2b0c..61be8d2 100644
 --- a/src/backends/wayland/wayland_output.cpp
 +++ b/src/backends/wayland/wayland_output.cpp
 @@ -22,6 +22,7 @@
@@ -647,7 +699,7 @@ index a9d2b0c..30881b2 100644
          auto toplevelIcon = xdg_toplevel_icon_manager_v1_create_icon(toplevelIconManager);
          xdg_toplevel_icon_v1_set_name(toplevelIcon, "kwin");
          xdg_toplevel_icon_manager_v1_set_icon(toplevelIconManager, *m_xdgShellSurface, toplevelIcon);
-@@ -174,28 +189,96 @@ WaylandOutput::WaylandOutput(const QString &name, WaylandBackend *backend, wl_ou
+@@ -174,28 +189,97 @@ WaylandOutput::WaylandOutput(const QString &name, WaylandBackend *backend, wl_ou
  
      connect(m_xdgShellSurface.get(), &XdgShellSurface::configureRequested, this, &WaylandOutput::handleConfigure);
      connect(m_xdgShellSurface.get(), &XdgShellSurface::closeRequested, qApp, &QCoreApplication::quit);
@@ -659,6 +711,7 @@ index a9d2b0c..30881b2 100644
 +void WaylandOutput::destroyHostWindow()
  {
      m_frames.clear();
++    m_cursor.reset();
 +    m_pointerLock.reset();
 +    m_hasPointerLock = false;
      if (m_shortcutInhibition) {
@@ -748,7 +801,7 @@ index a9d2b0c..30881b2 100644
          if (auto manager = m_backend->display()->explicitSynchronization()) {
              m_surfaceSynchronization = zwp_linux_explicit_synchronization_v1_get_synchronization(manager, *m_surface);
          }
-@@ -312,6 +395,9 @@ WaylandOutput::FrameData::~FrameData()
+@@ -312,6 +396,9 @@ WaylandOutput::FrameData::~FrameData()
  
  bool WaylandOutput::present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame)
  {
@@ -758,7 +811,7 @@ index a9d2b0c..30881b2 100644
      auto cursorLayers = layersToUpdate | std::views::filter([](OutputLayer *layer) {
          return layer->type() == OutputLayerType::CursorOnly;
      });
-@@ -500,6 +586,7 @@ void WaylandOutput::init(const QSize &pixelSize, qreal scale, bool fullscreen)
+@@ -500,6 +587,7 @@ void WaylandOutput::init(const QSize &pixelSize, qreal scale, bool fullscreen)
      initialState.scale = scale;
      setState(initialState);
  
@@ -766,7 +819,7 @@ index a9d2b0c..30881b2 100644
      if (fullscreen && m_fullscreenOn) {
          xdg_toplevel_set_fullscreen(*m_xdgShellSurface, m_fullscreenOn);
      } else {
-@@ -555,6 +642,9 @@ void WaylandOutput::applyConfigure(const QSize &size, quint32 serial)
+@@ -555,6 +643,9 @@ void WaylandOutput::applyConfigure(const QSize &size, quint32 serial)
  
  void WaylandOutput::updateWindowTitle()
  {
@@ -776,7 +829,7 @@ index a9d2b0c..30881b2 100644
      QString grab;
      if (m_hasPointerLock) {
          grab = i18n("Press right control to ungrab pointer");
-@@ -589,6 +679,9 @@ void WaylandOutput::lockPointer(Pointer *pointer, bool lock)
+@@ -589,6 +680,9 @@ void WaylandOutput::lockPointer(Pointer *pointer, bool lock)
          return;
      }
  
@@ -823,3 +876,18 @@ index e606cc2..e101a21 100644
      struct FrameData
      {
          explicit FrameData(const std::shared_ptr<OutputFrame> &frame, struct wp_presentation_feedback *presentationFeedback, struct wl_callback *frameCallback);
+diff --git a/src/backends/wayland/wayland_qpainter_backend.cpp b/src/backends/wayland/wayland_qpainter_backend.cpp
+index 8498918..0998d51 100644
+--- a/src/backends/wayland/wayland_qpainter_backend.cpp
++++ b/src/backends/wayland/wayland_qpainter_backend.cpp
+@@ -124,7 +124,9 @@ bool WaylandQPainterCursorLayer::doEndFrame(const Region &renderedDeviceRegion,
+     wl_buffer *buffer = static_cast<WaylandOutput *>(m_output.get())->backend()->importBuffer(m_back->buffer());
+     Q_ASSERT(buffer);
+ 
+-    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_back->buffer()->size() / m_output->scale(), hotspot().toPoint());
++    if (WaylandCursor *cursor = static_cast<WaylandOutput *>(m_output.get())->cursor()) {
++        cursor->update(buffer, m_back->buffer()->size() / m_output->scale(), hotspot().toPoint());
++    }
+     m_swapchain->release(m_back);
+     return true;
+ }
