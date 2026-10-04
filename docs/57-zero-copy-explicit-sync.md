@@ -172,6 +172,8 @@ DDR带宽取自内核`dcvs/bw_hwmon_meas`事件（bwmon每个采样窗口测得�
 - 启动时最多等60秒宿主socket可连接，而不是一次失败即退出。
 - 运行中宿主断开：记录“Host connection lost”，等宿主socket重新可连接（最多120秒）后以133退出。wrapper随即重启KWin且不计崩溃，新KWin一次连上宿主；不再产生核心转储。
 
+> 2026-10-05 起，运行中宿主断开时KWin不再退出：输出保留、宿主回来后重新接回，APK也不再重启会话，见[96 篇C节](96-desktop-recovery-after-apk-restart.md)。下面是当时的记录。
+
 验收：两次`am force-stop`后重新打开APK，0个新核心转储、0次段错误，桌面恢复。APK新宿主进程本来就会执行`restart-session`，客户端随会话重启，不再以崩溃方式退出。Qt重连缺陷本身未修改；它只在重连落到“没有可用KWin”的空窗时触发，本修复消除了这个空窗。
 
 ## 事故：打开Elisa后宿主被低内存杀手杀死（已移除Elisa）

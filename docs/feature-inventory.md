@@ -2041,11 +2041,11 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 
 #### 桌面会话经得起宿主重启
 
-`desktop.session` · 依赖安卓 — 安卓宿主（Rungic 应用）更新或重启时，KWin 等它回来再重启，客户端不崩；会话每次启动都从干净的环境开始，不被上一次的失败或旧会话拖累。
+`desktop.session` · 依赖安卓 — 安卓宿主（Rungic 应用）被关闭、被省电程序或低内存杀死、更新或重启时，KWin 和整个会话留着，宿主回来后窗口和未保存的内容都还在；会话每次启动都从干净的环境开始，不被上一次的失败或旧会话拖累。
 
 经由接口：`kwin-android-host`、`host-controller`
 
-- **E1** 应用更新或宿主进程重启时，KWin 记录“Host connection lost”、等宿主 socket 可连接后以 133 退出并被重启，不留核心转储；Qt 客户端不在重连空窗里段错误，桌面恢复。（人工）
+- **E1** 宿主进程不在时 KWin 不退出、手机输出保留（不渲染、CPU 接近 0），宿主回来后重新接回；KWin、plasmashell 和应用的进程不变，窗口和未保存文本保留，画面、触摸和输入恢复；反复断开不累积文件描述符。（人工）
 - **E2** 一次 GPU 启动失败（宿主重启时 EGL 暂不可用）不会让 plasmashell 永久改用软件渲染；有 GPU 时每次会话都清掉 SceneGraphBackend=software，应用抽屉不会空白。（人工）
 - **E3** 新会话等上一个会话的 startplasma-wayland 真正退出后才设置环境，plasmashell 总以手机 shell 启动，不会变成桌面版 shell。（系统测试、人工）
 - **E4** GPU 设置、登录 PATH 在任何会话单元启动前导入用户管理器；Qt 按 XDG_CURRENT_DESKTOP 选平台主题，旧会话强加的主题不残留到新会话。（实机验收）
@@ -2053,7 +2053,8 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 
 注意：
 - 上一个会话的 startplasma-wayland 退出时会把用户管理器环境恢复成它启动前的样子，曾删掉 PLASMA_DEFAULT_SHELL，让 plasmashell 以桌面版 shell 启动。 [docs/96-desktop-recovery-after-apk-restart.md](../docs/96-desktop-recovery-after-apk-restart.md)
-- KWin 嵌套后端在宿主断开时 qFatal（上游设计），wrapper 把非 0、非 133 的退出都算崩溃、超过 10 次就不再重启；Qt 的 QT_WAYLAND_RECONNECT 在没有全局对象时重建 surface 会段错误（QTBUG-150287，上游未修），只能靠消除“没有可用 KWin”的空窗来避开。 [docs/57-zero-copy-explicit-sync.md](../docs/57-zero-copy-explicit-sync.md)
+- KWin 嵌套后端在宿主断开时 qFatal（上游设计）；曾以 133 退出交给 wrapper 重启，APK 再重启会话，窗口和未保存内容全部丢失。Qt 的 QT_WAYLAND_RECONNECT 在没有全局对象时重建 surface 会段错误（QTBUG-150287，上游未修），所以 KWin 必须留着，不能有“没有可用 KWin”的空窗。 [docs/57-zero-copy-explicit-sync.md](../docs/57-zero-copy-explicit-sync.md) [docs/96-desktop-recovery-after-apk-restart.md](../docs/96-desktop-recovery-after-apk-restart.md)
+- 宿主断开时不能移除手机输出：工作区没有输出时 plasmashell 在占位屏幕上建 width=0 的面板，触发协议错误退出。旧连接要整个释放（socket、事件线程管道），宿主键盘映射的描述符要关闭，否则每次重连泄漏约 4 个描述符。 [docs/96-desktop-recovery-after-apk-restart.md](../docs/96-desktop-recovery-after-apk-restart.md)
 - KWin 退出时 Qt 客户端（plasmashell）在 wl_display_read_events 中崩溃的问题还在，部署工具从新会话就绪时才统计新崩溃。 [docs/72-kwin-android-host-isolation.md](../docs/72-kwin-android-host-isolation.md)
 - 迁移程序在 KWin 启动前运行，不能继承会话的 Wayland 平台（X70 首次会话五个迁移程序崩溃），只对迁移命令局部用 offscreen。 [docs/research/30-feature-adaptation.md](../docs/research/30-feature-adaptation.md)
 - 只看到进程或单元 active 不等于桌面可用；APK 升级后 kactivitymanagerd 曾激活失败，要以实际画面和就绪信号验收。 [docs/research/clipboard-background.md](../docs/research/clipboard-background.md) [docs/40-plasma-mobile-integration.md](../docs/40-plasma-mobile-integration.md)
