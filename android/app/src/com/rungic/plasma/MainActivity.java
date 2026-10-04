@@ -405,7 +405,11 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
                 catch (android.system.ErrnoException e) { if (e.errno != android.system.OsConstants.EEXIST) throw new IOException(e); }
                 updateSize();
                 writeDisplayInsets();
-                control(newServer ? "restart-session" : "start");
+                // A new host (this process started it) used to restart the whole desktop session.
+                // KWin now keeps the session while the host is away and reconnects by itself, so
+                // the windows survive the app being closed or killed; start only makes sure the
+                // container and session run (the controller restarts a failed session).
+                control("start");
                 Log.i("RungicWayland", NativeBridge.getWaylandRuntimeStats());
                 long ticket=NativeBridge.requestPhoneFrame();
                 if(ticket==0)throw new IOException("无法请求显示状态");

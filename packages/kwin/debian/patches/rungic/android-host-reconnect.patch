@@ -1,0 +1,376 @@
+From: clawd20130 <clawd20130@gmail.com>
+Date: Mon, 5 Oct 2026 03:09:04 +0900
+Subject: Android host: the desktop session survives the host going away
+
+When the Android host (the Rungic app) was closed, killed (a vendor's battery manager, low memory),
+updated or restarted, KWin exited with 133 for kwin_wayland_wrapper to restart it, and the app then
+restarted the whole desktop session: every window and anything unsaved was lost, though the Linux
+container and its processes were alive.
+
+Now the lost connection is reported once and never read again (WaylandDisplay); the backend drops
+the phone's and cast outputs (the workspace keeps the windows on its placeholder output), the input
+devices and the buffers imported on the connection (WaylandBackend::disconnectHost), and keeps the
+dead display allocated, as proxies of it may still be released. Every 500 ms it checks whether the
+host's socket answers, then connects again (connectHost, without the initial 60 s wait): new outputs
+and seat, the host's globals, text input and idle inhibition. The windows return to the phone's
+output.
+
+Forwarded: not-needed
+Last-Update: 2026-10-05
+X-Rungic-Status: Pending
+X-Rungic-Tests: L3:session.ready
+X-Rungic-Docs: docs/72
+Origin: vendor
+---
+ src/backends/android/android_backend.cpp | 77 +++++++++++++++++++++++++-------
+ src/backends/android/android_backend.h   |  6 +++
+ src/backends/wayland/wayland_backend.cpp | 68 ++++++++++++++++++++++------
+ src/backends/wayland/wayland_backend.h   | 10 +++++
+ src/backends/wayland/wayland_display.cpp | 28 +++++++++++-
+ 5 files changed, 158 insertions(+), 31 deletions(-)
+
+diff --git a/src/backends/android/android_backend.cpp b/src/backends/android/android_backend.cpp
+index 571b49d..e2e21ee 100644
+--- a/src/backends/android/android_backend.cpp
++++ b/src/backends/android/android_backend.cpp
+@@ -40,6 +40,8 @@ AndroidBackend::AndroidBackend(const Wayland::WaylandBackendOptions &options, co
+     : WaylandBackend(options, parent)
+     , m_android(android)
+ {
++    m_reconnectTimer.setInterval(500);
++    connect(&m_reconnectTimer, &QTimer::timeout, this, &AndroidBackend::reconnectHost);
+     // Input exists once the workspace does.
+     connect(kwinApp(), &Application::workspaceCreated, this, [this]() {
+         connect(input(), &InputRedirection::idleInhibitedChanged, this, &AndroidBackend::setIdleInhibited);
+@@ -213,27 +215,70 @@ Wayland::WaylandOutput *AndroidBackend::createOutputObject(const QString &name,
+ 
+ void AndroidBackend::configureDisplay(Wayland::WaylandDisplay *display)
+ {
+-    // The host goes away whenever its app is updated or restarted. Waiting for its socket and
+-    // asking kwin_wayland_wrapper for a restart (exit code 133) replaces an abort per host
+-    // restart: no core dump, and the wrapper's crash counter (it gives up after ten) is not
+-    // consumed. Clients stay on the wrapper's socket and reconnect.
++    // The host goes away whenever its app is closed, killed (a vendor's battery manager, low
++    // memory), updated or restarted. KWin and the whole desktop session stay: the phone's output
++    // and input go until the host is back, and the windows wait on the workspace's placeholder
++    // output (hostLost). It used to exit (133) for kwin_wayland_wrapper to restart it, and the
++    // app then restarted the desktop session: every window and anything unsaved was lost.
+     connect(display, &Wayland::WaylandDisplay::globalAnnounced, this, &AndroidBackend::handleGlobal);
+     connect(display, &Wayland::WaylandDisplay::globalRemoved, this, &AndroidBackend::handleGlobalRemoved);
+-    display->setConnectTimeout(std::chrono::seconds(60));
+-    const QByteArray socket = options().socketName.toUtf8();
+-    display->setConnectionLostHandler([socket]() {
+-        qCWarning(KWIN_WAYLAND_BACKEND) << "Host connection lost; waiting for the Android host to restart";
+-        for (int waited = 0; waited < 120000; waited += 250) {
+-            if (wl_display *probe = wl_display_connect(socket.constData())) {
+-                wl_display_disconnect(probe);
+-                break;
+-            }
+-            usleep(250 * 1000);
+-        }
+-        ::_exit(133); // kwin_wayland_wrapper: restart without counting a crash
++    // The first connection waits for a host that may still be starting; a reconnection is only
++    // tried once the host's socket answers (reconnectHost), so nothing blocks the session.
++    display->setConnectTimeout(m_initialized || m_reconnecting ? std::chrono::seconds(0) : std::chrono::seconds(60));
++    display->setConnectionLostHandler([this]() {
++        // Called while dispatching the lost connection: leave it before tearing anything down.
++        QTimer::singleShot(0, this, &AndroidBackend::hostLost);
+     });
+ }
+ 
++void AndroidBackend::hostLost()
++{
++    if (m_reconnecting) {
++        return;
++    }
++    qCWarning(KWIN_WAYLAND_BACKEND) << "Android host connection lost; keeping the session and waiting for the host";
++    m_reconnecting = true;
++    m_initialized = false;
++    // Everything bound on the host belongs to the dead connection (its proxies are left to it).
++    m_textInput.reset();
++    m_textInputManager = nullptr;
++    m_idleInhibitor = nullptr;
++    m_idleInhibitManager = nullptr;
++    m_queue = nullptr;
++    m_castOutputs.clear();
++    m_hostOutputs.clear();
++    disconnectHost();
++    m_reconnectTimer.start();
++}
++
++void AndroidBackend::reconnectHost()
++{
++    // Only connect once the host's socket answers: a connection attempt must not block.
++    if (wl_display *probe = wl_display_connect(options().socketName.toUtf8().constData())) {
++        wl_display_disconnect(probe);
++    } else {
++        return;
++    }
++    if (!connectHost()) {
++        qCWarning(KWIN_WAYLAND_BACKEND) << "Android host answered but the connection failed; retrying";
++        return;
++    }
++    m_reconnectTimer.stop();
++    bindHostGlobals();
++    if (m_textInputManager) {
++        m_textInput = std::make_unique<HostTextInput>(m_textInputManager, *display()->seat());
++    }
++    m_initialized = true;
++    m_reconnecting = false;
++    for (HostOutput *hostOutput : std::as_const(m_hostOutputs)) {
++        handleHostOutput(hostOutput);
++    }
++    if (InputRedirection *redirect = input()) {
++        setIdleInhibited(!redirect->idleInhibitors().isEmpty());
++    }
++    qCInfo(KWIN_WAYLAND_BACKEND) << "Reconnected to the Android host";
++}
++
+ QString AndroidBackend::renderDevicePath() const
+ {
+     return m_android.renderDevice;
+diff --git a/src/backends/android/android_backend.h b/src/backends/android/android_backend.h
+index 380c88c..0b6b330 100644
+--- a/src/backends/android/android_backend.h
++++ b/src/backends/android/android_backend.h
+@@ -7,6 +7,8 @@
+ 
+ #include "backends/wayland/wayland_backend.h"
+ 
++#include <QTimer>
++
+ struct wl_event_queue;
+ struct wl_registry;
+ struct wl_output;
+@@ -67,6 +69,8 @@ private:
+     void handleHostOutput(HostOutput *hostOutput);
+     void handleHostOutputRemoved(HostOutput *hostOutput);
+     void setIdleInhibited(bool inhibited);
++    void hostLost();
++    void reconnectHost();
+ 
+     const AndroidBackendOptions m_android;
+     wl_event_queue *m_queue = nullptr;
+@@ -76,6 +80,8 @@ private:
+     QHash<uint32_t, HostOutput *> m_hostOutputs;
+     QHash<HostOutput *, Wayland::WaylandOutput *> m_castOutputs;
+     bool m_initialized = false;
++    bool m_reconnecting = false;
++    QTimer m_reconnectTimer;
+     zwp_text_input_manager_v3 *m_textInputManager = nullptr;
+     std::unique_ptr<HostTextInput> m_textInput;
+ };
+diff --git a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
+index 713bac0..6656d9d 100644
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -326,8 +326,19 @@ WaylandInputBackend::WaylandInputBackend(WaylandBackend *backend, QObject *paren
+ }
+ 
+ void WaylandInputBackend::initialize()
++{
++    connect(m_backend, &WaylandBackend::seatChanged, this, [this]() {
++        addSeatDevices();
++    });
++    addSeatDevices();
++}
++
++void WaylandInputBackend::addSeatDevices()
+ {
+     WaylandSeat *seat = m_backend->seat();
++    if (!seat) {
++        return;
++    }
+     if (seat->relativePointerDevice()) {
+         Q_EMIT deviceAdded(seat->relativePointerDevice());
+     }
+@@ -471,13 +482,39 @@ WaylandBackend::~WaylandBackend()
+ 
+ bool WaylandBackend::initialize()
+ {
+-    m_display = std::make_unique<WaylandDisplay>();
+-    configureDisplay(m_display.get());
+-    if (!m_display->initialize(m_options.socketName)) {
++    if (!connectHost()) {
++        return false;
++    }
++
++    connect(this, &WaylandBackend::pointerLockChanged, this, [this](bool locked) {
++        if (!m_seat) {
++            return; // the host is away (disconnectHost)
++        }
++        if (locked) {
++            m_seat->createRelativePointer();
++        } else {
++            m_seat->destroyRelativePointer();
++        }
++    });
++
++    return true;
++}
++
++bool WaylandBackend::connectHost()
++{
++    auto display = std::make_unique<WaylandDisplay>();
++    configureDisplay(display.get());
++    if (!display->initialize(m_options.socketName)) {
+         return false;
+     }
++    // A connection lost before (disconnectHost) stays allocated: outputs and buffers of it may
++    // still be released, and their proxies must not outlive their display.
++    if (m_display) {
++        m_lostDisplays.push_back(std::move(m_display));
++    }
++    m_display = std::move(display);
+ 
+-    if (m_display->linuxDmabuf()) {
++    if (!m_drmDevice && m_display->linuxDmabuf()) {
+         const QString path = renderDevicePath();
+         m_drmDevice = DrmDevice::open(path);
+         if (!m_drmDevice) {
+@@ -494,18 +531,23 @@ bool WaylandBackend::initialize()
+     QAbstractEventDispatcher *dispatcher = QAbstractEventDispatcher::instance();
+     QObject::connect(dispatcher, &QAbstractEventDispatcher::aboutToBlock, m_display.get(), &WaylandDisplay::flush);
+     QObject::connect(dispatcher, &QAbstractEventDispatcher::awake, m_display.get(), &WaylandDisplay::flush);
+-
+-    connect(this, &WaylandBackend::pointerLockChanged, this, [this](bool locked) {
+-        if (locked) {
+-            m_seat->createRelativePointer();
+-        } else {
+-            m_seat->destroyRelativePointer();
+-        }
+-    });
+-
++    Q_EMIT seatChanged();
+     return true;
+ }
+ 
++void WaylandBackend::disconnectHost()
++{
++    // The host is gone (src/backends/android): its outputs go (the workspace keeps the windows on
++    // a placeholder), and so do the input devices and every buffer imported on the connection.
++    // The dead display itself stays until connectHost replaces it.
++    const QList<WaylandOutput *> outputs = m_outputs;
++    for (WaylandOutput *output : outputs) {
++        removeOutput(output);
++    }
++    m_seat.reset();
++    m_buffers.clear();
++}
++
+ void WaylandBackend::createOutputs()
+ {
+     // we need to multiply the initial window size with the scale in order to
+diff --git a/src/backends/wayland/wayland_backend.h b/src/backends/wayland/wayland_backend.h
+index 5733377..96a8161 100644
+--- a/src/backends/wayland/wayland_backend.h
++++ b/src/backends/wayland/wayland_backend.h
+@@ -113,6 +113,8 @@ public:
+     void initialize() override;
+ 
+ private:
++    void addSeatDevices();
++
+     WaylandBackend *m_backend;
+ };
+ 
+@@ -267,8 +269,15 @@ public:
+ 
+ Q_SIGNALS:
+     void pointerLockChanged(bool locked);
++    /// A new seat (connectHost): its devices replace the previous ones.
++    void seatChanged();
+ 
+ protected:
++    /// The host connection: display, outputs, seat (the render device once). False if the host
++    /// is not there; a previous, lost connection is then kept.
++    bool connectHost();
++    /// After the host connection was lost: outputs, seat and imported buffers go.
++    void disconnectHost();
+     const WaylandBackendOptions &options() const
+     {
+         return m_options;
+@@ -299,6 +308,7 @@ private:
+     std::unique_ptr<DrmDevice> m_drmDevice;
+     std::unique_ptr<EglDisplay> m_eglDisplay;
+     std::map<GraphicsBuffer *, std::unique_ptr<WaylandBuffer>> m_buffers;
++    std::vector<std::unique_ptr<WaylandDisplay>> m_lostDisplays;
+ };
+ 
+ } // namespace Wayland
+diff --git a/src/backends/wayland/wayland_display.cpp b/src/backends/wayland/wayland_display.cpp
+index a87e830..3d7410d 100644
+--- a/src/backends/wayland/wayland_display.cpp
++++ b/src/backends/wayland/wayland_display.cpp
+@@ -24,6 +24,8 @@
+ #include <QThread>
+ #include <QWaitCondition>
+ 
++#include <atomic>
++
+ #include <drm_fourcc.h>
+ #include <fcntl.h>
+ #include <poll.h>
+@@ -86,7 +88,12 @@ public:
+         while (true) {
+             if (wl_display_dispatch_pending(m_display) < 0) {
+                 if (m_connectionLost) {
+-                    m_connectionLost(); // a backend whose host restarts (src/backends/android)
++                    // A backend whose host restarts (src/backends/android) reconnects: the dead
++                    // connection is reported once and never read again.
++                    if (!m_lost.exchange(true)) {
++                        m_connectionLost();
++                    }
++                    return;
+                 }
+                 qFatal("Wayland connection broke");
+             }
+@@ -106,6 +113,11 @@ public:
+         }
+     }
+ 
++    bool isLost() const
++    {
++        return m_lost.load();
++    }
++
+     void stop()
+     {
+         if (m_quitPipe[1] != -1) {
+@@ -150,9 +162,17 @@ protected:
+             }
+ 
+             if (fds[0].revents & POLLIN) {
+-                wl_display_read_events(m_display);
++                if (wl_display_read_events(m_display) < 0 && m_connectionLost) {
++                    // The host went away: let the main thread notice (dispatch) and stop polling.
++                    Q_EMIT available();
++                    break;
++                }
+             } else {
+                 wl_display_cancel_read(m_display);
++                if ((fds[0].revents & (POLLHUP | POLLERR)) && m_connectionLost) {
++                    Q_EMIT available();
++                    break;
++                }
+             }
+         }
+     }
+@@ -160,6 +180,7 @@ protected:
+ private:
+     wl_display *const m_display;
+     const std::function<void()> m_connectionLost;
++    std::atomic<bool> m_lost = false;
+     int m_fd;
+     int m_quitPipe[2];
+     QAtomicInteger<bool> m_reading;
+@@ -223,6 +244,9 @@ WaylandDisplay::~WaylandDisplay()
+ 
+ void WaylandDisplay::flush()
+ {
++    if (m_eventThread->isLost()) {
++        return;
++    }
+     m_eventThread->dispatch();
+ }
+ 

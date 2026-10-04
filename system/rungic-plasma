@@ -318,10 +318,15 @@ case "$action" in
       fi
     fi
     # A plasmashell that failed while its compositor went away stays failed, and start would
-    # only wait for it; the APK's retry sends start (docs/96). Restart the session instead.
+    # only wait for it; the APK's retry sends start (docs/96). Restart the session instead. The
+    # APK sends start also when it was closed or killed and comes back: KWin keeps the session
+    # meanwhile and reconnects by itself, so a running session is kept, and only a failed or
+    # missing compositor or shell gets a session restart.
     if [ "$action" = start ] && running &&
-       attach /usr/bin/rungic-plasma-user-exec systemctl --user is-failed --quiet plasma-plasmashell.service 9>&-; then
-      echo 'plasmashell had failed; restarting the desktop session' >&2
+       attach /usr/bin/rungic-plasma-user-exec sh -c 'systemctl --user is-failed --quiet plasma-plasmashell.service ||
+         systemctl --user is-failed --quiet plasma-kwin_wayland.service ||
+         [ "$(systemctl --user is-active plasma-kwin_wayland.service)" = inactive ]' 9>&-; then
+      echo 'The desktop session had failed; restarting it' >&2
       action=restart-session
     fi
     # The session's own compositor and shell: the main processes of its two user units. Not pidof:
