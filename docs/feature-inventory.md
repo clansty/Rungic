@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 160 条功能、669 条体验，其中 625 条有检查。
+共 161 条功能、672 条体验，其中 628 条有检查。
 
 ## Agent 能力
 
@@ -2370,6 +2370,21 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 
 文档：[docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)
 
+#### 通过安卓 SIM 收发短信（实验）
+
+`desktop.sms` · 依赖安卓 — Linux 与 Agent 经安卓短信接口发出用户授权的内容，并按号码与时间读取回复；安卓保管消息，原短信应用保持不变。
+
+经由接口：`telephony`
+
+- **E1** 发送的号码与内容经过校验；使用明确的活动短信卡，长短信分段，只有全部无线电回报成功才记为已发出。（单元测试）
+- **E2** 发出与送达分开；重复回调、失败分段、未知或失败回执和超时不被误记为成功，也不自动重发。（单元测试）
+- **E3** 按号码与发送时间读回复，短号精确匹配，不漏掉发送调用结束前到达的回复；读取不修改未读状态，无回复超时明确返回。（单元测试）
+
+注意：
+- 短号受系统或运营商限制；接口受理、无线电发出、送达回执与客服回复是不同证据。 [docs/107-android-sms.md](../docs/107-android-sms.md)
+
+文档：[docs/107-android-sms.md](../docs/107-android-sms.md)
+
 #### 安卓状态及时到达 Linux
 
 `desktop.host-bridges` · Linux 系统功能 — 网络、蓝牙、蜂窝、剪贴板、相机等服务经平台桥的长轮询 watch 等安卓自己的回调，不再各自轮询。
@@ -2969,7 +2984,7 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 | `clipboard` 剪贴板 | 安卓 ClipboardDaemon 与 Wayland 剪贴板双向同步。 | `desktop-mode.clipboard`、`desktop.clipboard`、`desktop.clipboard-history` | 3 | 1 |
 | `network` 网络 | 安卓的 Wi-Fi 与网络状态，经 Linux 一侧的 NetworkManager D-Bus 接口给桌面用。 | `desktop.network` | 3 | 1 |
 | `bluetooth` 蓝牙 | 安卓蓝牙经 Linux 一侧的 BlueZ D-Bus 接口给桌面用。 | `desktop.bluetooth` | 3 | 1 |
-| `telephony` 蜂窝与通话 | 蜂窝网络状态（ModemManager 接口）、来电去电与通话控制。 | `agent.cellular-call`、`desktop.cellular` | 4 | 1 |
+| `telephony` 蜂窝与通话 | 蜂窝网络状态（ModemManager 接口）、来电去电与通话控制。 | `agent.cellular-call`、`desktop.cellular`、`desktop.sms` | 9 | 1 |
 | `ocr` 文字识别 | 手机 GPU 上的 OCR（PP-OCR），给目标式电脑操作用。 | `agent.plan-two` | 2 | 1 |
 | `wifi-display` 无线投屏 | 经安卓（高通）Wi-Fi Display 栈把输出投到电视：扫描、连接、断开、重连。 | `desktop-mode.cast-connect`、`desktop-mode.tv-shows-linux`、`desktop-mode.cast-video-modes`、`desktop-mode.cast-install`、`desktop-mode.tv-director` | 4 | 1 |
 | `shared-storage` 共享存储 | 安卓的共享存储（/storage/emulated/0/Plasma，MediaProvider FUSE）挂到容器的 /mnt/android-shared，用户目录和 ~/Shared 都在上面。 | `desktop.screen-recording` | 3 | 1 |

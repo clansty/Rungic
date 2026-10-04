@@ -13,21 +13,24 @@ import android.net.Uri;
 import android.provider.Telephony;
 import android.telephony.SmsManager;
 import android.telephony.SubscriptionManager;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SmsMessage;
+import android.os.Build;
+import java.util.List;
+import java.util.UUID;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /** Text messages through Android's SIM for the Linux side (op sms): send and list. Android keeps
  * the messages (the system SMS provider; a message sent here is saved to its sent box). SEND_SMS
  * and READ_SMS come from root (pm grant), like the telephony bridge's READ_PHONE_STATE. Answered on
  * its own thread: a send waits for the radio's result. */
 final class AndroidSmsBridge {
-    static final int MAX_TEXT=1000;
+    static final int MAX_TEXT=SmsState.MAX_TEXT;
     private static final long SENT_WAIT_MS=45000, DELIVERED_WAIT_MS=15000;
-    private static final AtomicInteger NEXT=new AtomicInteger();
     private final Activity activity;
     private final AndroidNetworkBridge root;
     AndroidSmsBridge(Activity activity,AndroidNetworkBridge root) { this.activity=activity;this.root=root; }
@@ -46,13 +49,6 @@ final class AndroidSmsBridge {
         throw new IllegalArgumentException("Unknown sms action");
     }
 
-    /** A phone number: digits with an optional leading +, as dialled (spaces and dashes removed). */
-    static String number(String raw) {
-        String value=raw==null?"":raw.replaceAll("[\\s-]","");
-        if(!value.matches("\\+?[0-9]{3,20}"))throw new IllegalArgumentException("Invalid phone number");
-        return value;
-    }
-
     private static String result(int code) {
         switch(code) {
             case Activity.RESULT_OK: return "sent";
@@ -67,51 +63,68 @@ final class AndroidSmsBridge {
     }
 
     private JSONObject send(JSONObject request) throws Exception {
-        String to=number(request.getString("to"));
+        String to=SmsState.number(request.getString("to"));
         String text=request.getString("text");
-        if(text.isEmpty() || text.length()>MAX_TEXT)throw new IllegalArgumentException("Text must be 1 to "+MAX_TEXT+" characters");
+        SmsState.text(text);
         grant(Manifest.permission.SEND_SMS);
-        int subscription=SubscriptionManager.getDefaultSmsSubscriptionId();
-        if(subscription==SubscriptionManager.INVALID_SUBSCRIPTION_ID)throw new IllegalStateException("No SIM for text messages");
-        SmsManager sms=activity.getSystemService(SmsManager.class).createForSubscriptionId(subscription);
+        grant(Manifest.permission.READ_PHONE_STATE);
+        List<SubscriptionInfo> active=activity.getSystemService(SubscriptionManager.class).getActiveSubscriptionInfoList();
+        int subscription=request.optInt("subscription",SubscriptionManager.getDefaultSmsSubscriptionId());
+        if(!request.has("subscription") && subscription<0 && active!=null && active.size()==1)
+            subscription=active.get(0).getSubscriptionId();
+        boolean found=false;
+        if(active!=null)for(SubscriptionInfo sim:active)if(sim.getSubscriptionId()==subscription)found=true;
+        if(!found)throw new IllegalStateException("No active default SMS SIM; select an active subscription");
+        SmsManager sms=SmsManager.getSmsManagerForSubscriptionId(subscription);
         ArrayList<String> parts=sms.divideMessage(text);
-        int id=NEXT.incrementAndGet();
+        String id=UUID.randomUUID().toString();
         String sentAction=activity.getPackageName()+".SMS_SENT."+id, deliveredAction=activity.getPackageName()+".SMS_DELIVERED."+id;
         CountDownLatch sent=new CountDownLatch(parts.size()), delivered=new CountDownLatch(parts.size());
-        int[] firstError={Activity.RESULT_OK};
-        AtomicInteger deliveredOk=new AtomicInteger();
+        SmsState state=new SmsState(parts.size());
         BroadcastReceiver receiver=new BroadcastReceiver() {
             @Override public void onReceive(Context context,Intent intent) {
                 if(sentAction.equals(intent.getAction())) {
-                    synchronized(firstError) { if(getResultCode()!=Activity.RESULT_OK && firstError[0]==Activity.RESULT_OK)firstError[0]=getResultCode(); }
-                    sent.countDown();
+                    if(state.sent(intent.getIntExtra("part",-1),getResultCode()))sent.countDown();
                 } else if(deliveredAction.equals(intent.getAction())) {
-                    deliveredOk.incrementAndGet();
-                    delivered.countDown();
+                    byte[] pdu=intent.getByteArrayExtra("pdu");
+                    if(pdu!=null) {
+                        String format=intent.getStringExtra("format");
+                        SmsMessage report=format==null?SmsMessage.createFromPdu(pdu):SmsMessage.createFromPdu(pdu,format);
+                        if(report!=null && state.receipt(intent.getIntExtra("part",-1),report.getStatus()))
+                            delivered.countDown();
+                    }
                 }
             }
         };
         IntentFilter filter=new IntentFilter();filter.addAction(sentAction);filter.addAction(deliveredAction);
-        activity.registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED);
+        if(Build.VERSION.SDK_INT>=33)activity.registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED);
+        else activity.registerReceiver(receiver,filter);
         try {
             ArrayList<PendingIntent> sentIntents=new ArrayList<>(), deliveredIntents=new ArrayList<>();
             for(int i=0;i<parts.size();i++) {
-                int flags=PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_ONE_SHOT;
-                sentIntents.add(PendingIntent.getBroadcast(activity,id*64+i,new Intent(sentAction).setPackage(activity.getPackageName()),flags));
-                deliveredIntents.add(PendingIntent.getBroadcast(activity,id*64+32+i,new Intent(deliveredAction).setPackage(activity.getPackageName()),flags));
+                Intent sentIntent=new Intent(sentAction).setPackage(activity.getPackageName())
+                        .setData(Uri.parse("rungic-sms://"+id+"/sent/"+i)).putExtra("part",i);
+                Intent deliveredIntent=new Intent(deliveredAction).setPackage(activity.getPackageName())
+                        .setData(Uri.parse("rungic-sms://"+id+"/delivery/"+i)).putExtra("part",i);
+                sentIntents.add(PendingIntent.getBroadcast(activity,i,sentIntent,
+                        PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_ONE_SHOT));
+                // Explicitly package-scoped; mutable only so the telephony service can attach
+                // the delivery PDU. A broadcast alone never proves successful delivery.
+                int deliveryFlags=PendingIntent.FLAG_ONE_SHOT;
+                if(Build.VERSION.SDK_INT>=31)deliveryFlags|=PendingIntent.FLAG_MUTABLE;
+                deliveredIntents.add(PendingIntent.getBroadcast(activity,i,deliveredIntent,deliveryFlags));
             }
             long started=System.currentTimeMillis();
             if(parts.size()==1)sms.sendTextMessage(to,null,text,sentIntents.get(0),deliveredIntents.get(0));
             else sms.sendMultipartTextMessage(to,null,parts,sentIntents,deliveredIntents);
-            boolean radioAnswered=sent.await(SENT_WAIT_MS,TimeUnit.MILLISECONDS);
-            JSONObject reply=new JSONObject().put("parts",parts.size()).put("sentAt",started);
-            int error;
-            synchronized(firstError) { error=firstError[0]; }
-            if(!radioAnswered)return reply.put("status","pending").put("error","The radio did not report a result in time");
-            if(error!=Activity.RESULT_OK)return reply.put("status","failed").put("error",result(error));
-            // Delivery reports are optional (the network may not send them): wait briefly only.
+            sent.await(SENT_WAIT_MS,TimeUnit.MILLISECONDS);
+            JSONObject reply=new JSONObject().put("parts",parts.size()).put("submittedAt",started)
+                    .put("subscription",subscription).put("sentParts",state.sentParts()).put("status",state.status());
+            if(state.status().equals("failed"))return reply.put("error",result(state.error()));
+            if(state.status().equals("pending"))return reply.put("error","Radio result unknown; do not resend automatically");
             delivered.await(DELIVERED_WAIT_MS,TimeUnit.MILLISECONDS);
-            return reply.put("status","sent").put("delivered",deliveredOk.get()>=parts.size());
+            return reply.put("sentAt",System.currentTimeMillis()).put("delivery",state.delivery())
+                    .put("delivered",state.delivery().equals("delivered"));
         } finally {
             try { activity.unregisterReceiver(receiver); } catch(IllegalArgumentException ignored) {}
         }
@@ -131,25 +144,26 @@ final class AndroidSmsBridge {
         int limit=Math.max(1,Math.min(100,request.optInt("limit",20)));
         StringBuilder where=new StringBuilder();
         ArrayList<String> args=new ArrayList<>();
+        if(request.has("since") && request.getLong("since")<0)throw new IllegalArgumentException("Invalid since timestamp");
         if(request.has("since")) { where.append(Telephony.Sms.DATE+">=?");args.add(Long.toString(request.getLong("since"))); }
         String from=request.optString("from","");
         // Android stores the number as the network gave it (with or without +86): compare the
         // digits' end here rather than with SQL functions the provider may not accept.
-        String digits=from.isEmpty()?"":number(from).replace("+","");
+        if(!from.isEmpty())SmsState.number(from);
         JSONArray messages=new JSONArray();
         int scanned=0;
         try(Cursor c=activity.getContentResolver().query(uri,
                 new String[]{Telephony.Sms._ID,Telephony.Sms.ADDRESS,Telephony.Sms.BODY,Telephony.Sms.DATE,Telephony.Sms.TYPE,Telephony.Sms.READ},
                 where.length()==0?null:where.toString(),args.toArray(new String[0]),Telephony.Sms.DATE+" DESC")) {
-            while(c!=null && c.moveToNext() && messages.length()<limit && scanned++<2000) {
-                String address=c.getString(1)==null?"":c.getString(1).replaceAll("[^0-9]","");
-                if(!digits.isEmpty() && !address.endsWith(digits))continue;
+            if(c==null)throw new IllegalStateException("SMS provider unavailable");
+            while(c.moveToNext() && messages.length()<limit && scanned++<2000) {
+                if(!from.isEmpty() && !SmsState.sameNumber(from,c.getString(1)))continue;
                 int type=c.getInt(4);
                 messages.put(new JSONObject().put("id",c.getLong(0)).put("address",c.getString(1)).put("text",c.getString(2))
                         .put("date",c.getLong(3)).put("box",type==Telephony.Sms.MESSAGE_TYPE_SENT?"sent":type==Telephony.Sms.MESSAGE_TYPE_INBOX?"inbox":"other")
                         .put("read",c.getInt(5)!=0));
             }
         }
-        return new JSONObject().put("messages",messages);
+        return new JSONObject().put("messages",messages).put("truncated",scanned>=2000);
     }
 }
