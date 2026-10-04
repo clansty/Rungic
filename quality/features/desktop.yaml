@@ -850,6 +850,9 @@ features:
     code:
       - android/app/src/com/rungic/plasma/AndroidSmsBridge.java
       - android/app/src/com/rungic/plasma/SmsState.java
+      - android/app/src/com/rungic/plasma/SmsIntents.java
+      - android/sms-tests/SmsIntentDriver.java
+      - android/test-sms-intents.sh
       - shared/platform/sms.py
       - tools/tests/test_sms.py
       - tools/tests/SmsStateDriver.java

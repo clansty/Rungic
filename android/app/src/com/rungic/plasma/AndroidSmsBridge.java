@@ -96,16 +96,14 @@ final class AndroidSmsBridge {
                 }
             }
         };
-        IntentFilter filter=new IntentFilter();filter.addAction(sentAction);filter.addAction(deliveredAction);
+        IntentFilter filter=SmsIntents.filter(sentAction,deliveredAction);
         if(Build.VERSION.SDK_INT>=33)activity.registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED);
         else activity.registerReceiver(receiver,filter);
         try {
             ArrayList<PendingIntent> sentIntents=new ArrayList<>(), deliveredIntents=new ArrayList<>();
             for(int i=0;i<parts.size();i++) {
-                Intent sentIntent=new Intent(sentAction).setPackage(activity.getPackageName())
-                        .setData(Uri.parse("rungic-sms://"+id+"/sent/"+i)).putExtra("part",i);
-                Intent deliveredIntent=new Intent(deliveredAction).setPackage(activity.getPackageName())
-                        .setData(Uri.parse("rungic-sms://"+id+"/delivery/"+i)).putExtra("part",i);
+                Intent sentIntent=SmsIntents.callback(activity.getPackageName(),id,"sent",i);
+                Intent deliveredIntent=SmsIntents.callback(activity.getPackageName(),id,"delivered",i);
                 sentIntents.add(PendingIntent.getBroadcast(activity,i,sentIntent,
                         PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_ONE_SHOT));
                 // Explicitly package-scoped; mutable only so the telephony service can attach
@@ -118,12 +116,13 @@ final class AndroidSmsBridge {
             if(parts.size()==1)sms.sendTextMessage(to,null,text,sentIntents.get(0),deliveredIntents.get(0));
             else sms.sendMultipartTextMessage(to,null,parts,sentIntents,deliveredIntents);
             sent.await(SENT_WAIT_MS,TimeUnit.MILLISECONDS);
+            long sentAt=System.currentTimeMillis();
             JSONObject reply=new JSONObject().put("parts",parts.size()).put("submittedAt",started)
                     .put("subscription",subscription).put("sentParts",state.sentParts()).put("status",state.status());
             if(state.status().equals("failed"))return reply.put("error",result(state.error()));
             if(state.status().equals("pending"))return reply.put("error","Radio result unknown; do not resend automatically");
             delivered.await(DELIVERED_WAIT_MS,TimeUnit.MILLISECONDS);
-            return reply.put("sentAt",System.currentTimeMillis()).put("delivery",state.delivery())
+            return reply.put("sentAt",sentAt).put("delivery",state.delivery())
                     .put("delivered",state.delivery().equals("delivered"));
         } finally {
             try { activity.unregisterReceiver(receiver); } catch(IllegalArgumentException ignored) {}

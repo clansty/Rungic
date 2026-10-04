@@ -18,4 +18,35 @@
 
 ## 回归与实机记录
 
-待本轮测试与部署结果补齐；产物、日志和私有回复保存在 `.work/verify/20261004-android-sms/`，不进入源码。既有开发覆盖与用户数据保留，不发布新 rootfs。
+### 离线与 Android 运行时
+
+- 短信状态、分段失败、重复回调、实际送达状态码、号码/Unicode 校验、查询时间窗、无回复退出码、权限错误及不自动重试：15 个针对性测试通过。连同文档索引与既有 APK 准备门槛契约，22 项、15 个子测试通过。
+- APK 全量 Java/资源编译、签名校验通过；既有 FirstBootState/ControlException Java 回归通过。
+- 全量离线首次为 899 passed、16 failed、3 errors、6 skipped、509 subtests，随后 Qt/Python 退出崩溃；新增文档未列入索引的失败已修复且单独复测通过。其余 15 个失败和 3 个 Java fixture 错误全部在原始 main df49e28c 的全量对照中复现（884 passed、16 failed、3 errors、508 subtests；对照另一个失败是未建本地 cache 目录，建目录后单测通过）。因此不声称全量通过；Python/JDK 容器启动环境、媒体编码和已有接口测试问题仍在。首次 runner 的独立 javac 还受容器工作目录影响，修正启动环境后实际 Java 测试通过。
+- 清单严格检查：161 个功能，0 错误，44 个既有 device-only 提示；补齐 docs 索引，差异空白检查通过。
+
+首次真实短信发送确实成功，但 CLI 等不到回调而返回 pending。根因是每个 PendingIntent 的 Intent 带 `rungic-sms://...` URI，而原过滤器只声明 action、没有对应 data scheme。Android 官方 [IntentFilter](https://developer.android.com/reference/android/content/IntentFilter) 的数据匹配规则要求双方一致。修复提取为生产 SmsIntents，过滤器声明 scheme；保留应用私有 PendingIntent 与 RECEIVER_NOT_EXPORTED，不开放外部回调入口。sentAt 记录无线电回报结束的时间，不包含随后等待送达的时间。
+
+`android/test-sms-intents.sh` 构建生产 SmsIntents 和 SmsIntentDriver，经指定手机的 app_process 使用真实 Android IntentFilter；不调用 SmsManager，不读写短信库。回归确认旧缺少 scheme 的过滤器返回 NO_MATCH_DATA，修复后发送/送达 Intent 匹配，并检查分段、请求隔离。本次 Android 16 实机通过。可先在 APK 构建容器内使用 `RUNGIC_ANDROID_JAR`、`RUNGIC_ANDROID_BUILD_TOOLS` 运行 `bash android/test-sms-intents.sh --build-only`，再在宿主执行：
+
+```sh
+RUNGIC_SERIAL=ZY32M9MRVP bash android/test-sms-intents.sh --run-only
+```
+
+### USB G100 真实短信
+
+- 设备 ZY32M9MRVP，Android 16，中国电信，活动 subscription 1；原 APK 2.30/78，安装 2.31/79，保留数据。修复后的 APK SHA-256：`54503fa3bf03891f864672743bf6ec5b4c0855e1e002ea2ca1dad77ceabd6ee3`。
+- **只发了一条**：10000，内容“查询话费”，submittedAt=1791081791665。初版 CLI 返回 pending/sentParts=0，但系统发件箱 id 5、date=1791081792193 证明已发出；10000 的对应新收件 id 6、date=1791081795918 是电信话费查询链接。未打开链接、未办理业务、未改发 10001。
+- 修复后重新安装 APK，再用原 submittedAt 查询：回复仍可检出，read=false 保持未读，默认短信应用仍为 com.android.messaging。未重发短信，因此**修复后的真实无线电回调和运营商送达 PDU 未再次实测**；不能将 IntentFilter 回归冒充实际回执验收。多 SIM 与真实长短信分段也未上机发送，状态边界由离线回归覆盖。
+- 空时间窗 `--wait 0` 返回 timedOut/退出 1；无效 subscription -1 明确拒绝，未提交第二条短信。telephony 提供者 3 个只读查询全部通过，检查不发送短信，私有消息字段被隐藏。
+
+### 开发覆盖与恢复
+
+使用项目 rungic-dev-release 技能（`.agents/skills/rungic-dev-release/SKILL.md`），没有发布新 rootfs、提交旧快照或操作日常 G100 S。
+
+- 源码构建提交 797e431e；APK 后续回调过滤修复单独提交。Mac mini 原生构建两个包：rungic-plasma-bridges `0.358+dev20261004t024128.797e431` 与 rungic-voice-agent `0.510+dev20261004t024128.797e431`。
+- 官方开发覆盖 `20260930.19+dev20261004t024128`，基线 20260930.19，39 个原有覆盖保留；apt Installed=Candidate 全部通过，release_mismatch=0。完整性仍有部署前既有的 305 个 missing，changed_files=0，没有新增缺失。
+- 独立 worktree 首次构建后因本地包池缺少旧覆盖元数据而在安装前中止；从原工作区复制已有包池记录后经同一官方工具完成安装，没有手工 dpkg 安装或抹去旧覆盖。
+- 新 CLI 与 phone skill 的实机 SHA 分别与源码相同。先核实通话 idle、无活动 Agent 任务，再重启网络/蓝牙/蜂窝桥及 voice-agent/overlay；APK 重装后启动 MainActivity，KWin、Plasma 和上述服务均 active。默认短信角色与应用数据保留，原 APK 已备份。
+
+产物、日志和私有回复保存在 `.work/verify/20261004-android-sms/`，不进入源码；开发部署详细记录在此工作树 `.work/dev-deploy/20261004-104128-deploy/`。
