@@ -852,6 +852,7 @@ features:
       - android/app/src/com/rungic/plasma/SmsState.java
       - android/app/src/com/rungic/plasma/SmsIntents.java
       - android/sms-tests/SmsIntentDriver.java
+      - android/sms-tests/SmsReceiptDriver.java
       - android/test-sms-intents.sh
       - shared/platform/sms.py
       - tools/tests/test_sms.py

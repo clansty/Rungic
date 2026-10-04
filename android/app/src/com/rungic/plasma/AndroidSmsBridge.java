@@ -90,7 +90,8 @@ final class AndroidSmsBridge {
                     if(pdu!=null) {
                         String format=intent.getStringExtra("format");
                         SmsMessage report=format==null?SmsMessage.createFromPdu(pdu):SmsMessage.createFromPdu(pdu,format);
-                        if(report!=null && state.receipt(intent.getIntExtra("part",-1),report.getStatus()))
+                        if(report!=null && report.isStatusReportMessage()
+                                && state.receipt(intent.getIntExtra("part",-1),format,report.getStatus()))
                             delivered.countDown();
                     }
                 }
@@ -150,19 +151,21 @@ final class AndroidSmsBridge {
         // digits' end here rather than with SQL functions the provider may not accept.
         if(!from.isEmpty())SmsState.number(from);
         JSONArray messages=new JSONArray();
-        int scanned=0;
+        SmsState.Scan scan=new SmsState.Scan(limit);
         try(Cursor c=activity.getContentResolver().query(uri,
                 new String[]{Telephony.Sms._ID,Telephony.Sms.ADDRESS,Telephony.Sms.BODY,Telephony.Sms.DATE,Telephony.Sms.TYPE,Telephony.Sms.READ},
                 where.length()==0?null:where.toString(),args.toArray(new String[0]),Telephony.Sms.DATE+" DESC")) {
             if(c==null)throw new IllegalStateException("SMS provider unavailable");
-            while(c.moveToNext() && messages.length()<limit && scanned++<2000) {
-                if(!from.isEmpty() && !SmsState.sameNumber(from,c.getString(1)))continue;
+            while(c.moveToNext()) {
+                boolean include=scan.accept(from.isEmpty() || SmsState.sameNumber(from,c.getString(1)));
+                if(scan.stopped)break;
+                if(!include)continue;
                 int type=c.getInt(4);
                 messages.put(new JSONObject().put("id",c.getLong(0)).put("address",c.getString(1)).put("text",c.getString(2))
                         .put("date",c.getLong(3)).put("box",type==Telephony.Sms.MESSAGE_TYPE_SENT?"sent":type==Telephony.Sms.MESSAGE_TYPE_INBOX?"inbox":"other")
                         .put("read",c.getInt(5)!=0));
             }
         }
-        return new JSONObject().put("messages",messages).put("truncated",scanned>=2000);
+        return new JSONObject().put("messages",messages).put("truncated",scan.truncated);
     }
 }
