@@ -50,7 +50,10 @@ void Tasks::restore(QJsonArray saved){
 bool ReplyBuffer::append(QString responseId,QString itemId,const QByteArray &data){
     if(retired.contains(responseId)||(cancelled&&responseId==response))return true;
     if(responseId!=response){if(!response.isEmpty())retired.insert(response);response=responseId;item=itemId;pending.clear();cancelled=false;++generation;}
-    if(pending.size()+data.size()>24000*2*30)return false;
+    // The model streams a spoken reply faster than it plays, so a long one (a story, a game's turn)
+    // runs ahead of playback by minutes; a 30 s bound ended such conversations ("Reply audio
+    // exceeded the buffer limit", 2026-10-05). Ten minutes ahead (about 29 MB) only bounds a fault.
+    if(pending.size()+data.size()>MaxPendingBytes)return false;
     pending+=data;return true;
 }
 void ReplyBuffer::clear(){pending.clear();if(!response.isEmpty())retired.insert(response);cancelled=true;++generation;}

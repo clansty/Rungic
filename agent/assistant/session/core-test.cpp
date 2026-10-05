@@ -23,6 +23,6 @@ int main(int argc,char **argv){QCoreApplication app(argc,argv);
     bounded.rows[0].status="completed";check(!bounded.add("replacement",true,"chat","new").isEmpty()&&bounded.rows.size()==128,"terminal history can be evicted without dropping live work");
     ReplyBuffer audio;check(audio.append("response1","item1",QByteArray(4800,'a')),"first PCM accepted");audio.clear();auto e=audio.generation;
     audio.append("response1","item1",QByteArray(4800,'b'));check(audio.pending.isEmpty(),"late cancelled PCM discarded");check(audio.generation==e,"late packet cannot resurrect generation");
-    audio.append("response2","item2",QByteArray(4800,'c'));check(audio.pending.size()==4800,"new reply plays");audio.append("response1","item1",QByteArray(200,'x'));check(audio.response=="response2"&&audio.pending.size()==4800,"old reply cannot replace a newer reply");check(!audio.append("response2","item2",QByteArray(24000*2*30,'d')),"playback memory bounded");
+    audio.append("response2","item2",QByteArray(4800,'c'));check(audio.pending.size()==4800,"new reply plays");audio.append("response1","item1",QByteArray(200,'x'));check(audio.response=="response2"&&audio.pending.size()==4800,"old reply cannot replace a newer reply");check(audio.append("response2","item2",QByteArray(24000*2*120,'d')),"a two-minute reply ahead of playback is kept");check(!audio.append("response2","item2",QByteArray(ReplyBuffer::MaxPendingBytes,'d')),"playback memory bounded");
     std::puts("session-core: scheduling, cancellation, bounds and playback checks passed");return 0;
 }

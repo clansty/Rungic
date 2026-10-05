@@ -34,6 +34,8 @@ public:
 // Reply audio belongs to one response and generation. Cancelled deltas must never be replayed.
 class ReplyBuffer {
 public:
+    // 24 kHz 16-bit mono: ten minutes of reply audio not yet played.
+    static constexpr qsizetype MaxPendingBytes=qsizetype(24000)*2*600;
     QString item,response;
     QByteArray pending;
     quint64 generation=0;
