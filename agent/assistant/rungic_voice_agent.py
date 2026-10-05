@@ -59,7 +59,8 @@ from voice_i18n import _, desktop_language, language_name, language_note
 RATE = 24000                 # PCM format of the Realtime API
 RELEASE_PLAYER_S = 1.5       # after a reply, until its tail left the sink's buffers
 CHUNK_MS = 100
-MIC = 'android_microphone'
+# Push-to-talk's microphone; RUNGIC_VOICE_MIC names another source (a test's null sink monitor).
+MIC = os.environ.get('RUNGIC_VOICE_MIC') or 'android_microphone'
 PHONE_SINK = 'android_phone'     # always the phone itself (shared/media/media-bridge.py)
 IDLE_STOP_S = 600            # stop an unused realtime session (cost)
 # Apps switched into the agent's workspace (one instance per user: WeChat, a browser profile;
