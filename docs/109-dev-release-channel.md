@@ -23,7 +23,8 @@ Kevin 批准的做法：只从 origin/main 出发布；APK 是发布的一部分
    - 自有包：`rungic_package.current()` 判为过期的，用 `rungic_package.build()` 构建；
    - 上游组件：`release/packages.json` 的 `rebuilt` 里来自 `packages/<名>` 的组件，changelog 版本的包不在仓库里的，经 `build_on_device.py` 构建并 `collect` 进仓库。和 `rungic_dev.py` 一样，上次构建成功、留着 obj 树时增量构建，否则全量构建；Mesa 用它的 Meson 构建和 `build_mesa.package`。
    - 每次组件构建把 `packages/<名>` 及配方 overlay 文件的 git 树哈希记在 `.work/apt/component-builds.json`。补丁队列改了却没加 changelog 条目时，仓库里已有同版本的旧构建，`dev` 会拒绝并要求加一条 changelog（新版本），不会把旧内容当新版本发出去。
-   - APK：`android/build-apk.sh`（输出目录由 `RUNGIC_APK_OUT` 指定），或 `--apk 文件`，或 `--no-apk`。原生库仍来自 `android/build-native-core.sh` 的产物。
+   - APK：`android/build-apk.sh`（输出目录由 `RUNGIC_APK_OUT` 指定），或 `--apk 文件`，或 `--no-apk`。宿主原生库（`libuniffi_winland_core.so`）每次都用 `android/build-native-core.sh` 从这个提交编译（`build_native_libs`，K8 上增量约 20 秒到 2 分钟）；其余原生库（libc++_shared、LiteRT、OCR、libxkbcommon）取自 `RUNGIC_NATIVE_LIBS` 或参考目录。编译失败就停下，不再带旧库出发布；没有项目代理的机器用 `RUNGIC_PROXY=`。
+   - 2026-10-05 发现：20261005.2–.4 的 APK 直接用了参考目录里的整套原生库，其中宿主库是 2026-09-29 的构建，之后合入的宿主改动（10-01/02 的电视 director 等）都没进 APK。
 3. **发布记录**：`build(channel='dev', apk=...)`，元包里的 `/usr/share/rungic/release.json` 和 `.work/apt/releases/<版本>.json` 都多了 `channel`（`dev`；`build` 出的正式发布是 `release`；更早的发布没有这个字段，按正式发布显示）和 `apk`（文件名、包名、versionName、versionCode、sha256、大小）。APK 存在 `.work/apt/apk/Rungic-<versionName>-<versionCode>-<sha 前 12 位>.apk`。
 4. **版本号**：仍是 `YYYYMMDD.N`，但要避开本机仓库的号、origin 上已发布的 `dev-*` tag（`git ls-remote`）和 `release/history.json` 里部署过的号。
 5. **发布包**：见下一节。

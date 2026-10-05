@@ -1307,10 +1307,34 @@ def build_component(name):
     return {'component': name, 'version': version, 'mode': mode, 'seconds': round(time.time() - started)}
 
 
+def build_native_libs(out):
+    """The APK's native libraries with the Android host built from this commit
+    (android/build-native-core.sh) -> their directory, for build-apk.sh (RUNGIC_NATIVE_LIBS).
+    Libraries the host build does not make (libc++_shared, LiteRT, OCR, libxkbcommon) come
+    from RUNGIC_NATIVE_LIBS or the reference directory. Releases 20261005.2-.4 took that
+    directory whole: their host library was a build of 2026-09-29, without the host changes
+    merged since (docs/109)."""
+    base = Path(os.environ.get('RUNGIC_NATIVE_LIBS') or WORKSPACE / '.work/refs/plasma-mobile-20260923/native-libs')
+    if not (base / 'lib/arm64-v8a').is_dir():
+        raise SystemExit(f'{base}/lib/arm64-v8a: no native libraries to build the APK with (RUNGIC_NATIVE_LIBS)')
+    stage = out / 'native-libs'
+    shutil.copytree(base, stage, symlinks=True)
+    (stage / 'lib/arm64-v8a/libuniffi_winland_core.so').unlink(missing_ok=True)
+    built = subprocess.run(['bash', str(WORKSPACE / 'android/build-native-core.sh')], cwd=WORKSPACE,
+                           env=dict(os.environ, RUNGIC_NATIVE_OUT=str(stage / 'lib/arm64-v8a'),
+                                    RUNGIC_JNI_LIBS_DIR=str(base / 'lib/arm64-v8a')))
+    if built.returncode or not (stage / 'lib/arm64-v8a/libuniffi_winland_core.so').is_file():
+        raise SystemExit('android/build-native-core.sh failed: the release does not ship an old host library; '
+                         'fix the build (RUNGIC_PROXY= without the project proxy), or pass --apk FILE, or --no-apk')
+    return stage
+
+
 def build_apk_file(out):
-    """android/build-apk.sh into `out` -> the signed APK (Rungic-<versionName>.apk)."""
+    """android/build-apk.sh into `out` -> the signed APK (Rungic-<versionName>.apk), with the host
+    library built from this commit (build_native_libs)."""
+    native = build_native_libs(out)
     built = subprocess.run(['bash', str(WORKSPACE / 'android/build-apk.sh')], cwd=WORKSPACE,
-                           env=dict(os.environ, RUNGIC_APK_OUT=str(out)))
+                           env=dict(os.environ, RUNGIC_APK_OUT=str(out), RUNGIC_NATIVE_LIBS=str(native)))
     apks = sorted(out.glob('Rungic-*.apk'))
     if built.returncode or not apks:
         raise SystemExit('android/build-apk.sh failed (its native libraries come from android/build-native-core.sh); '
