@@ -45,6 +45,12 @@ Item {
     signal openImage(url source, string name)
     // A command without the shell wrapper Codex adds.
     function summary(text) { return text.replace(/^\/bin\/(?:ba)?sh -lc '([\s\S]*)'$/, "$1") }
+    // A link in an answer: a file on this phone (a bare path, <path> or ~/…) opens as file://;
+    // passed as it is, a path resolved against the app's own qrc base and opened nothing (an
+    // agent's "open the game" link, 2026-10-05). Web links stay as they are.
+    function openLink(link) { Qt.openUrlExternally(Media.localUrl(String(link), home) || link) }
+    // A task's result as the work turn's answer is shown: its pictures and files come out of the text.
+    readonly property var taskResult: kind === "phone-task" ? Media.parse(output, home) : ({text: "", images: [], files: []})
     function duration(seconds) { return i18nc("@info a short duration", "%1s", seconds) }
 
     width: ListView.view ? ListView.view.width : column
@@ -109,7 +115,32 @@ Item {
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.metaSize
             }
-            Body { visible: !!entry.output; text: entry.output; Layout.fillWidth: true }
+            Body { visible: entry.taskResult.text !== ""; text: entry.taskResult.text; Layout.fillWidth: true }
+            Flow {
+                Layout.fillWidth: true
+                visible: entry.taskResult.images.length + entry.taskResult.files.length > 0
+                spacing: 8
+                Repeater {
+                    model: entry.taskResult.images
+                    Thumbnail {
+                        required property var modelData
+                        source: modelData.url
+                        name: modelData.name
+                        maxWidth: entry.taskResult.images.length > 1 ? (entry.column - 8) / 2 : Math.min(entry.column, 320)
+                        maxHeight: 360
+                        onClicked: entry.openImage(source, name)
+                    }
+                }
+                Repeater {
+                    model: entry.taskResult.files
+                    FileChip {
+                        required property var modelData
+                        name: modelData.name
+                        maxWidth: entry.column
+                        onClicked: Qt.openUrlExternally(modelData.url)
+                    }
+                }
+            }
             Repeater {
                 model: taskBox.question.questions || []
                 delegate: ColumnLayout {
@@ -249,7 +280,7 @@ Item {
         font.family: Theme.fontFamily
         font.pixelSize: Theme.bodySize
         color: Theme.text
-        onLinkActivated: link => Qt.openUrlExternally(link)
+        onLinkActivated: link => entry.openLink(link)
     }
 
     component Actions: RowLayout {
@@ -509,6 +540,7 @@ Item {
             // Pictures show under the turn; a bare path would not load here (media.js).
             text: step.kind === "answer" || step.kind === "note" ? Media.parse(step.text, entry.home).text : step.text
             textFormat: step.kind === "note" || step.kind === "answer" ? Text.MarkdownText : Text.PlainText
+            onLinkActivated: link => entry.openLink(link)
             wrapMode: Text.Wrap
             font.family: Theme.fontFamily
             font.pixelSize: Theme.metaSize

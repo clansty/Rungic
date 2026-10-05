@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 162 条功能、702 条体验，其中 658 条有检查。
+共 162 条功能、703 条体验，其中 659 条有检查。
 
 ## Agent 能力
 
@@ -93,9 +93,10 @@
 - **E3** 用户可以发照片和文件：图片作为图片交给 Agent，其他文件给出路径由 Agent 自己读。带图发送后 Agent 能描述图片内容，气泡上方显示缩略图。（单元测试、人工）
 - **E4** 视频和动图附件先抽 2–8 帧（约每 2 秒一帧，长边不超过 1024）随消息交给 Agent，并写明时长、尺寸和有无声音。没有 ffmpeg 或读不出时只附路径。用户消息先显示，不等抽帧。（单元测试、人工）
 - **E5** 打开附件面板时键盘收起，面板占据键盘原来的位置。最近照片取自“图片”目录，4 列显示。（单元测试、人工）
+- **E6** 回答和语音任务卡片里指向本机文件的链接（裸路径、<路径>、~/ 开头，含中文）点了就打开；任务卡片里的图片和文件也像这一轮的回答一样显示成缩略图和文件卡片。（单元测试）
 
 注意：
-- Markdown 文本控件按应用自己的 qrc 基址解析裸路径。本机图片要改写为 file:// 才加载得出来。 [docs/88-agent-visible-work.md](../docs/88-agent-visible-work.md)
+- Markdown 文本控件按应用自己的 qrc 基址解析裸路径。本机图片要改写为 file:// 才加载得出来；链接也一样，点按时要先把本机路径换成 file:// 再交给系统打开（2026-10-05 语音任务卡片里“打开小游戏”的链接点了没反应）。 [docs/88-agent-visible-work.md](../docs/88-agent-visible-work.md)
 - Codex 只收静态图（GIF 只取第一帧，动态 WebP 原样发出），所以动图和视频由我们抽帧。 [docs/88-agent-visible-work.md](../docs/88-agent-visible-work.md)
 - 容器的 Qt 图片插件原本没有 WebP，所有 Qt 应用都打不开 WebP。rungic-design 依赖 qt6-image-formats-plugins。 [docs/88-agent-visible-work.md](../docs/88-agent-visible-work.md)
 - AnimatedImage 在界面线程同步打开本地文件、会拉伸 GIF，不能直接替换 Image。视频在对话里还只显示为文件卡片。“拍照”因没有相机入口而隐藏。 [docs/88-agent-visible-work.md](../docs/88-agent-visible-work.md) [docs/87-agent-app-redesign.md](../docs/87-agent-app-redesign.md)

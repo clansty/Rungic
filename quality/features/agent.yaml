@@ -249,8 +249,11 @@ features:
         text: 打开附件面板时键盘收起，面板占据键盘原来的位置。最近照片取自“图片”目录，4 列显示。
         evidence:
           - {doc: docs/87-agent-app-redesign.md, date: 2026-09-29}
+      - id: E6
+        text: 回答和语音任务卡片里指向本机文件的链接（裸路径、<路径>、~/ 开头，含中文）点了就打开；任务卡片里的图片和文件也像这一轮的回答一样显示成缩略图和文件卡片。
+        gap: 实机点按任务卡片里的链接尚未验证
     pitfalls:
-      - text: Markdown 文本控件按应用自己的 qrc 基址解析裸路径。本机图片要改写为 file:// 才加载得出来。
+      - text: Markdown 文本控件按应用自己的 qrc 基址解析裸路径。本机图片要改写为 file:// 才加载得出来；链接也一样，点按时要先把本机路径换成 file:// 再交给系统打开（2026-10-05 语音任务卡片里“打开小游戏”的链接点了没反应）。
         docs: [docs/88-agent-visible-work.md]
       - text: Codex 只收静态图（GIF 只取第一帧，动态 WebP 原样发出），所以动图和视频由我们抽帧。
         docs: [docs/88-agent-visible-work.md]
@@ -262,6 +265,7 @@ features:
       - agent/assistant/media_frames.py
       - agent/assistant/app/qml/media.js
       - tools/tests/test_media_frames.py
+      - tools/tests/test_media_links.py
     docs: [docs/88-agent-visible-work.md, docs/87-agent-app-redesign.md]
 
   - id: agent.progress
