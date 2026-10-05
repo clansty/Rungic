@@ -40,6 +40,9 @@ public:
     QByteArray pending;
     quint64 generation=0;
     bool cancelled=false;
+    // The reply ran past MaxPendingBytes: what was buffered still plays, the rest is dropped (the
+    // session cuts the reply there, Session::replyTooLong); the conversation goes on.
+    bool full=false;
     QSet<QString> retired;
     bool append(QString responseId,QString itemId,const QByteArray &data);
     void clear();

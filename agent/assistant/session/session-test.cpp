@@ -149,5 +149,20 @@ int main(int argc,char **argv){
         check(ended["reason"]=="Voice paused while Plasma is hidden","the summary says why the call ended when it was not hung up");
         check(c.started==0&&c.fields()["startedAt"].toDouble()==0,"after the call no start time is left");
     }
+    {
+        // A reply too long to buffer is cut, never the conversation (2026-10-05: a 30 s bound that
+        // stopped the session ended Kevin's game).
+        Session v;QList<QJsonObject> events;v.output=[&](QJsonObject o){events.append(o);};
+        v.conversation="long";v.id="voice-long";v.configured=true;v.generation=1;v.responseActive=true;
+        v.responses["long-reply"]={"tell a story","u1",1,false};
+        auto delta=[&](qsizetype bytes){v.incoming({{"type","response.output_audio.delta"},{"response_id","long-reply"},{"item_id","item-long"},
+                                                    {"delta",QString::fromLatin1(QByteArray(bytes,'\x01').toBase64())}});};
+        delta(ReplyBuffer::MaxPendingBytes);delta(960);delta(960);
+        check(v.id=="voice-long","an overlong reply does not end the session");
+        check(v.playback.full&&v.playback.pending.size()==ReplyBuffer::MaxPendingBytes,"what was buffered still plays, the rest is dropped");
+        v.incoming({{"type","response.cancelled"},{"response_id","long-reply"}});
+        check(v.playback.pending.size()==ReplyBuffer::MaxPendingBytes,"cutting the reply keeps its buffered audio");
+        for(const auto &o:events)if(o["type"]=="event")check(o["event"].toObject()["type"]!="phone-notice","no notice ends or interrupts the conversation");
+    }
     std::puts("session state, transcript fidelity, late events, cancellation and hangup checks passed");
 }

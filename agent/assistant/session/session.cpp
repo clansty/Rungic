@@ -198,7 +198,7 @@ void Session::incoming(QJsonObject o){
         auto response=o["response_id"].toString();auto context=responses.value(response);
         if(!responses.contains(response)||context.generation!=generation||localSpeech||narrationSuppressed)return;
         if(playback.response!=response){playStart=audio.written;playedSamples=0;}
-        if(!playback.append(response,o["item_id"].toString(),QByteArray::fromBase64(o["delta"].toString().toLatin1())))stop("Reply audio exceeded the buffer limit");
+        if(!playback.append(response,o["item_id"].toString(),QByteArray::fromBase64(o["delta"].toString().toLatin1())))replyTooLong();
     } else if(type=="response.output_audio_transcript.delta"){
         const auto response=o["response_id"].toString();if(responses.contains(response)&&responses[response].generation==generation){}
     } else if(type=="response.output_audio_transcript.done"){
@@ -206,12 +206,21 @@ void Session::incoming(QJsonObject o){
     } else if(type=="response.function_call_arguments.done"){
         tool(o["name"].toString(),QJsonDocument::fromJson(o["arguments"].toString().toUtf8()).object(),o["call_id"].toString(),o["response_id"].toString());
     } else if(type=="response.cancelled"){
-        const auto response=o["response_id"].toString(o["response"].toObject()["id"].toString());if(response==playback.response)stopSpeaking();
+        const auto response=o["response_id"].toString(o["response"].toObject()["id"].toString());if(response==playback.response&&!playback.full)stopSpeaking();
     } else if(type=="response.done"){
         const auto r=o["response"].toObject();const auto response=r["id"].toString();
-        if(responses.contains(response)&&responses[response].generation==generation){responseActive=false;if(r["status"]=="cancelled"&&response==playback.response)stopSpeaking();state();}
+        if(responses.contains(response)&&responses[response].generation==generation){responseActive=false;if(r["status"]=="cancelled"&&response==playback.response&&!playback.full)stopSpeaking();state();}
         responses.remove(response);
     }
+}
+void Session::replyTooLong(){
+    // A reply too long to buffer is cut where its buffered audio ends: that part still plays, the
+    // model stops generating and its record of the reply ends there too (what the user hears), and
+    // the conversation goes on. Stopping the session here ended conversations (2026-10-05).
+    const qint64 heardMs=(qint64(playedSamples)+playback.pending.size()/2)*1000/24000;
+    send({{"type","conversation.item.truncate"},{"item_id",playback.item},{"content_index",0},{"audio_end_ms",heardMs}});
+    if(responseActive)send({{"type","response.cancel"},{"response_id",playback.response}});
+    qWarning().noquote()<<"reply audio past"<<ReplyBuffer::MaxPendingBytes/48000<<"s ahead of playback: cut at"<<heardMs<<"ms";
 }
 void Session::stopSpeaking(){
     if(!playback.item.isEmpty()&&(!playback.pending.isEmpty()||audio.player)){
