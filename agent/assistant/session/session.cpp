@@ -128,7 +128,7 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
     else if(method=="ExternalBusy"){externalBusy=args["busy"].toBool();if(!externalBusy)runQueue();done({{"ok",true}});}
     else if(method=="SendPhoneText"){
         if(id.isEmpty()||args["conversationId"].toString()!=conversation){done({{"error","Text belongs to another conversation"}});return;}
-        QString text=args["text"].toString().trimmed();if(text.isEmpty()){done({{"ok",true}});return;}
+        QString text=args["text"].toString().trimmed();if(text.isEmpty()){done({{"ok",true}});return;}lastUserText=text;
         stopSpeaking();++generation;utterance=uuid();submitted=true;localSpeech=serverSpeech=false;inputItems.clear();transcripts.clear();send({{"type","input_audio_buffer.clear"}});
         QJsonObject item{{"type","message"},{"role","user"},{"content",QJsonArray{QJsonObject{{"type","input_text"},{"text",text}}}}};
         send({{"type","conversation.item.create"},{"item",item}});
@@ -209,7 +209,15 @@ void Session::incoming(QJsonObject o){
     if(type=="error"){
         auto e=o["error"].toObject();auto code=e["code"].toString();
         if(code.contains("cancel_not_active")||code.contains("truncate")||code.contains("commit_empty")){if(code.contains("commit_empty"))commitPending=false;return;}
-        stop(e["message"].toString("Voice protocol error; tap to resume"));return;
+        // Recovery first (2026-10-05): one refused request (a reply, an update) does not end the call;
+        // the reply it was for is given up. Only a session that cannot go on (expired, the key or
+        // quota refused) ends it.
+        if(code.contains("session_expired")||code.contains("api_key")||code.contains("quota")||code.contains("unauthorized")){
+            stop(e["message"].toString("Voice protocol error; tap to resume"));return;
+        }
+        qWarning().noquote()<<"voice request refused:"<<code<<e["message"].toString();
+        if(!expected.isEmpty()&&!responseActive){expected.removeFirst();state();}
+        return;
     }
     if(type=="input_audio_buffer.speech_started"){
         if(muted||inputBlocked)return;
@@ -287,8 +295,16 @@ void Session::tick(){
             for(const auto &item:inputItems){if(!transcripts.contains(item)){complete=false;break;}parts.append(transcripts[item]);}
             if(complete&&!serverSpeech&&!commitPending&&now-lastVoice>=700){
                 submitted=true;QString text=parts.join(" ").trimmed();
-                if(!text.isEmpty()){event({{"type","message"},{"id",utterance},{"role","user"},{"text",text}});requestReply({text,utterance,generation,false});}
-            } else if(now-lastVoice>10000){submitted=true;event({{"type","phone-notice"},{"text","That utterance was not completed; please repeat"}});}
+                if(!text.isEmpty()){lastUserText=text;event({{"type","message"},{"id",utterance},{"role","user"},{"text",text}});requestReply({text,utterance,generation,false});}
+            } else if(now-lastVoice>10000){
+                // Not completed in time (a transcript late or lost, the end of speech not heard): what
+                // was heard is acted on, not dropped (a request for Ardour music was lost so,
+                // 2026-10-05). Only nothing heard at all asks to repeat.
+                submitted=true;QStringList heard;for(const auto &item:inputItems)if(transcripts.contains(item)&&!transcripts[item].isEmpty())heard.append(transcripts[item]);
+                const QString text=heard.join(" ").trimmed();
+                if(!text.isEmpty()){lastUserText=text;event({{"type","message"},{"id",utterance},{"role","user"},{"text",text}});requestReply({text,utterance,generation,false});}
+                else event({{"type","phone-notice"},{"text","That utterance was not completed; please repeat"}});
+            }
         }
         // The reply is kept ahead of what Android has played of it. Not by Android's own buffer: the
         // communication service keeps that a little ahead with PulseAudio's silence whatever is played,
@@ -317,9 +333,26 @@ void Session::requestReply(ResponseContext context,QString instruction){
     if(!configured||context.generation!=generation)return;
     if(responseActive||!expected.isEmpty()||(context.progress&&(!playback.pending.isEmpty()||clock.elapsed()-lastPlaybackPush<300))){context.instruction=instruction;deferred.append(context);if(deferred.size()>8)deferred.removeFirst();return;}
     expected.append(context);state();
+    send({{"type","response.create"},{"response",replyRequest(context,instruction)}});
+}
+QJsonObject Session::replyRequest(const ResponseContext &context,const QString &instruction) const{
     QJsonObject response;
-    if(context.progress){response["tool_choice"]="none";response["instructions"]=instruction+"\nVerified updates:\n"+context.text;}
-    send({{"type","response.create"},{"response",response}});
+    if(context.progress){
+        response["tool_choice"]="none";
+        // A response's instructions replace the session's: the rules stay with it (one assistant, no
+        // steps for the user, the user's language). Without them an acknowledgement told the user to
+        // choose the TV's input, and an update came in Korean (the G100 S, 2026-10-05).
+        response["instructions"]=prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))
+            +"\n\n"+instruction+"\nVerified updates:\n"+context.text;
+        if(context.utterance.isEmpty()){
+            // An update of its own (progress, a task's end) is spoken outside the conversation: inside
+            // it, it answered a request the user had just made, with no tools ("I can't do that").
+            response["conversation"]="none";
+            const QString said=lastUserText.isEmpty()?QString():"\nThe user's last words (speak their language): "+lastUserText.left(200);
+            response["input"]=QJsonArray{QJsonObject{{"type","message"},{"role","user"},{"content",QJsonArray{QJsonObject{{"type","input_text"},{"text","Give this update to the user now."+said}}}}}};
+        }
+    }
+    return response;
 }
 void Session::tool(QString name,QJsonObject args,QString callId,QString responseId){
     if(callId.isEmpty())return;const auto context=responses.value(responseId);

@@ -71,7 +71,9 @@ int main(int argc,char **argv){
     s.onSpeech(false);s.lastVoice=s.clock.elapsed()-1000;s.tick();
     check(!s.inputBlocked&&s.phase=="connected","quiet interval restores listening explicitly");
     s.incoming({{"type","error"},{"error",QJsonObject{{"code","invalid_response"},{"message","test protocol failure"}}}});
-    check(s.id.isEmpty()&&s.phase=="closed","unknown protocol failure releases voice resources");
+    check(!s.id.isEmpty(),"one refused request does not end the call (recovery first, 2026-10-05)");
+    s.incoming({{"type","error"},{"error",QJsonObject{{"code","session_expired"},{"message","test session expired"}}}});
+    check(s.id.isEmpty()&&s.phase=="closed","a session that cannot go on releases voice resources");
     {
         // covers: agent.phone-mode/E16
         // How much of a reply to play: by what Android has played of it, not by its buffer (which the
@@ -200,6 +202,20 @@ int main(int argc,char **argv){
         // Progress for the voice from push-to-talk's rules (Narrate) is accepted with no call open.
         QJsonObject said;w.command("Narrate",{{"text","Progress: now drawing"}},[&](QJsonObject r){said=r;});
         check(said["ok"].toBool(),"narration accepted");
+    }
+    {
+        // covers: agent.phone-mode/E9
+        // The voice's own reports keep the session's rules (a response's instructions replace them):
+        // an acknowledgement told the user to choose the TV's input, an update came in Korean, and an
+        // update inside the conversation answered the user's new request without tools ("I can't").
+        Session r;r.prompt="RULES: one assistant; never give the user steps.";r.lastUserText="给这个画配一段背景音乐";
+        const auto ack=r.replyRequest({"cast started","utt-1",1,true},"Acknowledge the tool result.");
+        check(ack["tool_choice"]=="none"&&ack["instructions"].toString().startsWith("RULES:")&&ack["instructions"].toString().contains("Acknowledge the tool result."),"an acknowledgement keeps the rules");
+        check(!ack.contains("conversation"),"an acknowledgement stays with its utterance");
+        const auto update=r.replyRequest({"Now: drawing the hills",{},1,true},"Report only these updates.");
+        check(update["instructions"].toString().startsWith("RULES:")&&update["conversation"]=="none","an update keeps the rules and stays outside the conversation");
+        check(update["input"].toArray()[0].toObject()["content"].toArray()[0].toObject()["text"].toString().contains("给这个画配一段背景音乐"),"in the user's language");
+        check(r.replyRequest({"draw it","utt-2",1,false},"").isEmpty(),"an answer to the user is the session's own");
     }
     // covers: agent.phone-mode/E14 agent.phone-mode/E15
     // The app's call bar and its summary (docs/101): the state says when the call began and when the

@@ -15,7 +15,7 @@ public:
     Tasks tasks;
     QWebSocket ws;
     QTimer timer;
-    QString id,conversation,phase="closed",language,prompt,utterance,focusedQuestion;
+    QString id,conversation,phase="closed",language,prompt,utterance,focusedQuestion,lastUserText;
     QStringList inputItems;
     QHash<QString,QString> transcripts,assistantText;
     QHash<QString,ResponseContext> responses;
@@ -58,6 +58,7 @@ public:
     void replyTooLong();
     void stopSpeaking();
     void requestReply(ResponseContext context,QString instruction={});
+    QJsonObject replyRequest(const ResponseContext &context,const QString &instruction) const;
     void tool(QString name,QJsonObject args,QString callId,QString responseId);
     void rpc(QString method,QJsonObject params,std::function<void(QJsonObject)> done={});
     void notification(QString method,QJsonObject params);
