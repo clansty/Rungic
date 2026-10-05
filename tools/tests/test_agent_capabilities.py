@@ -101,3 +101,11 @@ def test_found_in_the_acceptance_call_of_2026_10_05():
         text = (prompts / voice).read_text()
         assert 'Do not tell the user steps to take for it' in text, voice
         assert 'Do not mention files that execution read, skills, tools or commands.' in text, voice
+
+
+
+# covers: agent.phone-mode/E7
+def test_the_user_says_whether_after_or_beside():
+    # 2026-10-05, the user: sequential or parallel is a capability, chosen by what is asked.
+    phone = (Path(__file__).resolve().parents[2] / 'agent/assistant/prompts/phone.md').read_text()
+    assert '"画完再…": steer_task' in phone and '"再开一个任务":\nstart_task' in phone
