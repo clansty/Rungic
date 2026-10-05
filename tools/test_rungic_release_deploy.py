@@ -307,6 +307,22 @@ class DeployTests(Workspace):
         self.assertEqual(history[-1]['record'], str(records[0].relative_to(self.root)))
         self.assertEqual((history[-1]['version'], history[-1]['previous'], history[-1]['result']), ('20261001.2', '20261001.1', 'ok'))
 
+    # covers: delivery.release-deploy/E5
+    def test_a_snapshot_kept_from_the_last_deploy_is_replaced_by_the_new_one(self):
+        # 2026-10-05, the user: "why not just deploy?" The system running since the last deploy is
+        # kept and the new snapshot is the way back; it used to abort until someone committed.
+        rungic_release.rootfs_state = lambda: ('image', 'snapshot')
+        log = rungic_release.deploy('20261001.2', acceptance='none')
+        self.assertEqual(log['result'], 'ok')
+        self.assertIn(('commit', 'snapshot'), self.calls, 'kept, then a new snapshot, in one stop of the container')
+        self.assertTrue(self.steps(log, 'kept'))
+
+    def test_a_rollback_under_way_still_waits_for_a_decision(self):
+        rungic_release.rootfs_state = lambda: ('image', 'rollback')
+        log = rungic_release.deploy('20261001.2', acceptance='none')
+        self.assertEqual(log['result'], 'aborted')
+        self.assertFalse([c for c in self.calls if isinstance(c, tuple) and c[0] == 'install'])
+
     # covers: delivery.dev-channel/E4 delivery.dev-channel/E8
     def test_the_apk_follows_the_container_side_and_every_deploy_is_in_the_history(self):
         self.info.update(channel='dev', apk={'file': 'Rungic-2.32-80-x.apk', 'version_code': 80})

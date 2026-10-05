@@ -857,9 +857,11 @@ def rootfs_state():
 
 
 def with_container_stopped(action, before_start=None):
-    """Stop the container, run a rootfs action (then before_start, e.g. restore_android), start it again."""
+    """Stop the container, run a rootfs action, or several in order (then before_start, e.g.
+    restore_android), start it again."""
     outputs = []
-    for step in ('stop', action, 'start'):
+    actions = [action] if isinstance(action, str) else list(action)
+    for step in ('stop', *actions, 'start'):
         if step == 'start' and before_start:
             outputs.append(f'android: restored {before_start()}')
         if step in ('stop', 'start'):
@@ -972,12 +974,18 @@ def deploy_release(version=None, restart='auto', acceptance='smoke', record_labe
     mode, state = rootfs_state()
     use_snapshot = snapshot == 'always' or (snapshot == 'auto' and mode == 'image')
     if use_snapshot:
-        if state not in ('none', 'merging'):     # a finished rollback merge is completed by the snapshot step
+        # A snapshot kept from the last deploy: the system now running is kept (the user has used it
+        # since), and the new snapshot replaces the old one as the way back (2026-10-05, the user: "why
+        # not just deploy?"). Any other state (a rollback under way) still waits for a decision.
+        replace = state == 'snapshot'
+        if state not in ('none', 'merging') and not replace:     # a finished rollback merge is completed by the snapshot step
             log['result'] = 'aborted'
-            step('abort', reason=f'the rootfs has a kept snapshot (state {state}): rungic_release.py commit '
-                 'to keep the current system, or rollback --snapshot to return to the snapshot, first')
+            step('abort', reason=f'the rootfs is in state {state}: finish it (rungic_release.py commit, or '
+                 'rollback --snapshot) first')
             return log
-        ok, text = with_container_stopped('snapshot')
+        ok, text = with_container_stopped(('commit', 'snapshot') if replace else 'snapshot')
+        if replace:
+            step('kept', note='the system deployed before is kept; the new snapshot replaces its snapshot')
         step('snapshot', ok=ok, output=text[-400:])
         if not ok:
             log['result'] = 'aborted'

@@ -290,7 +290,7 @@ rootfs从目录迁入ext4镜像，升级前自动建立dm-snapshot；btrfs按第
 - **SELinux**：内核loop worker以`u:r:kernel:s0`运行，读不了`adb_data_file`，loop设备会返回I/O错误。仿照docker的做法，`plasma/rootfs.sepolicy.rule`定义`moto_plasma_image`，镜像文件打上这个标签，只允许kernel访问这类文件。
 - **LXC接入**：LXC的存储后端不接受普通块设备，所以配置里仍写目录，由`lxc.hook.pre-mount`（`plasma/rootfs-mount-hook`）在容器的mount namespace中把dm设备挂到该目录。`moto-plasma start`在镜像模式下先attach，`stop`后detach。
 - **踩过的坑**：toybox losetup只接受64字节以内的路径，且默认autoclear；`mount -o context=`被拒绝，改为给镜像根打标签；`snapshot-merge`状态要读`dmctl`输出的最后一行（第一行是表头）；最初的`migrate`在复制前移动了数据，改为先带排除项复制，成功后再移动。
-- **发布集成**：镜像模式下`rungic_release.py deploy`先停容器建快照，重启后等待会话稳定再安装；验收（失败时重试一次）通过则保留快照，直到`rungic_release.py commit`；失败则先保存证据包（`.work/diag/*-deploy-<版本>-failed`，因为journal会随回滚丢失），再停容器合并快照。`rollback --snapshot`可以手动回到快照。
+- **发布集成**：镜像模式下`rungic_release.py deploy`先停容器建快照，重启后等待会话稳定再安装；验收（失败时重试一次）通过则保留快照，直到`rungic_release.py commit`，或者下一次部署：它在同一次停容器时先保留当前系统、丢掉这个快照，再建新的快照（2026-10-05 起；此前遇到保留中的快照会中止，必须先手动 commit）；失败则先保存证据包（`.work/diag/*-deploy-<版本>-failed`，因为journal会随回滚丢失），再停容器合并快照。`rollback --snapshot`可以手动回到快照。
 - **实测**：迁移前后冒烟验收一致；20260926.10与.11共3次验收失败，都自动回到快照，回滚后`moto-plasma-release`与dpkg状态为部署前的版本。容器启动到会话就绪：目录11.2秒，镜像8.2秒。顺序写：目录378–953 MB/s，镜像467–618 MB/s；顺序读：目录约585 MB/s，镜像约740 MB/s。合成器paint p95 3.415 ms、呈现间隔p95 16.7 ms，与迁移前处于同一水平。
 - **保留的回退**：迁移前的目录rootfs保存为`rootfs.pre-image`（约24G），确认镜像模式稳定后再删除。迁移前的包状态备份在`.work/backups/pre-packages-20260926.tar.gz`。
 
