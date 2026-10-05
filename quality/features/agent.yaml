@@ -66,6 +66,8 @@ features:
         text: 助理执行由 Linux 用户管理器常驻。手机图形会话停止或尚未打开时，服务与任务不跟随退出。
       - id: E10
         text: 只有用户自己说的或打的话才会交给执行。任务结果、进度和 Agent 的提问都不算请求，语音只念给用户听，并等用户回答。语音没等用户开口就自己开的一轮会被当场停下，不显示成任务。
+        evidence:
+          - {doc: docs/115-push-to-talk-coordinator.md, date: 2026-10-06, note: "G100 S：画完问“要不要再画一个配套的”后等着，没有自己开工；回答“好”才开工"}
     pitfalls:
       - text: 以前用 Codex 的实时会话封装：它固定用服务端 VAD（静音 500 ms 即结束一轮），而且把 Agent 的输出以用户身份（"[BACKEND]" 前缀）放进语音对话，语音曾把 Agent 的提问当成用户请求自己开工。现在改用电话的协调器（按住即一句，结果用带外回应播报）。
         docs: [docs/115-push-to-talk-coordinator.md, docs/59-voice-agent.md]
