@@ -52,7 +52,7 @@ bool ReplyBuffer::append(QString responseId,QString itemId,const QByteArray &dat
     if(responseId!=response){if(!response.isEmpty())retired.insert(response);response=responseId;item=itemId;pending.clear();cancelled=false;full=false;++generation;}
     if(full)return true;
     // The model streams a spoken reply faster than it plays, so a long one (a story, a game's turn)
-    // runs ahead of playback by minutes. Ten minutes ahead (about 29 MB) bounds memory; past it the
+    // runs ahead of playback by minutes. Half an hour ahead (about 86 MB) bounds memory; past it the
     // reply is cut where the buffered audio ends (false, once), never the conversation: a 30 s bound
     // that stopped the session ended Kevin's game ("Reply audio exceeded the buffer limit", 2026-10-05).
     if(pending.size()+data.size()>MaxPendingBytes){full=true;return false;}

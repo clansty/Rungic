@@ -157,7 +157,8 @@ int main(int argc,char **argv){
         v.responses["long-reply"]={"tell a story","u1",1,false};
         auto delta=[&](qsizetype bytes){v.incoming({{"type","response.output_audio.delta"},{"response_id","long-reply"},{"item_id","item-long"},
                                                     {"delta",QString::fromLatin1(QByteArray(bytes,'\x01').toBase64())}});};
-        delta(ReplyBuffer::MaxPendingBytes);delta(960);delta(960);
+        for(int i=0;i<18;++i)delta(ReplyBuffer::MaxPendingBytes/18);   // half an hour, in parts
+        delta(960);delta(960);
         check(v.id=="voice-long","an overlong reply does not end the session");
         check(v.playback.full&&v.playback.pending.size()==ReplyBuffer::MaxPendingBytes,"what was buffered still plays, the rest is dropped");
         v.incoming({{"type","response.cancelled"},{"response_id","long-reply"}});
