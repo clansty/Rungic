@@ -44,6 +44,12 @@ def user_profile(home: Path) -> Path:
     key.commit()
     key.close()
     (profile / 'logins.json').write_text(json.dumps({'logins': [{'hostname': 'https://github.com'}]}))
+    (profile / 'prefs.js').write_text('user_pref("termsofuse.acceptedVersion", 4);\n')
+    logins = sqlite3.connect(profile / 'logins.db')
+    logins.execute('CREATE TABLE loginsL (origin TEXT)')
+    logins.execute("INSERT INTO loginsL VALUES ('https://github.com')")
+    logins.commit()
+    logins.close()
     return profile
 
 
@@ -60,6 +66,9 @@ def test_the_users_sign_ins_are_copied_into_the_workspace_profile(tmp_path, monk
     assert rows == [('signed-in',)]
     assert json.loads((target / 'logins.json').read_text())['logins'][0]['hostname'] == 'https://github.com'
     assert sqlite3.connect(target / 'key4.db').execute('SELECT count(*) FROM metadata').fetchone() == (1,)
+    # Firefox 156 keeps saved logins in logins.db; and the user's settings, with the accepted terms.
+    assert sqlite3.connect(target / 'logins.db').execute('SELECT origin FROM loginsL').fetchall() == [('https://github.com',)]
+    assert 'termsofuse.acceptedVersion' in (target / 'prefs.js').read_text()
     assert not list(target.glob('*.rungic-part'))
 
 

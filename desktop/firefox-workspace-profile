@@ -6,7 +6,7 @@ session bus: a Firefox there cannot share the user's profile with the phone's Fi
 per profile; the second could not even reach the first to hand it a window, and failed with
 "already running"). The workspace has its own profile, DIR (the firefox wrapper passes it), and
 before its Firefox starts it gets a copy of what keeps the user signed in: cookies, saved logins and
-their key, certificates and their exceptions. One way, the user's are kept: what the agent signs in
+their key, certificates and their exceptions, and the user's settings (prefs.js). One way, the user's are kept: what the agent signs in
 to stays in the workspace, and the next start begins again from the user's.
 
 Nothing here may keep Firefox from starting: a file that cannot be copied is left as it was, with a
@@ -22,8 +22,11 @@ from pathlib import Path
 
 # SQLite databases are copied with SQLite's backup (consistent while the user's Firefox writes);
 # the rest as files (Firefox replaces logins.json whole).
-DATABASES = ('cookies.sqlite', 'key4.db', 'cert9.db')
-FILES = ('logins.json', 'cert_override.txt')
+DATABASES = ('cookies.sqlite', 'key4.db', 'cert9.db', 'logins.db')
+# prefs.js too: the user's settings, as when both shared one profile, and with them the accepted terms
+# of use and data policy, without which a new profile opened on Firefox's first-run dialog, in the
+# agent's way (the G100 S, 2026-10-05).
+FILES = ('logins.json', 'cert_override.txt', 'prefs.js')
 
 
 def user_profile(home: Path, config: Path) -> Path | None:
