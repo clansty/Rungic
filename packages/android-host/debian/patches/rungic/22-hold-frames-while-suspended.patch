@@ -1,0 +1,50 @@
+From: clawd20130 <clawd20130@gmail.com>
+Date: Mon, 5 Oct 2026 10:59:50 +0900
+Subject: Phone frames are held while the phone surface is gone,
+ so KWin stops drawing with the screen off
+
+With the screen off (or the app in the background) the host presents nothing for the phone, but
+each new frame KWin committed got the previous one reported discarded at once, and KWin counts a
+discarded frame as done: it composited every client update (a blinking cursor, a window writing
+its state) for nothing. mibook measured KWin at 6.7% of a core over 4 h 25 min of standby with two
+test windows open. Superseded phone frames are now held as for a paced output: KWin stops at two
+pending frames until the surface is back, when render_all reports them discarded. Cast sources and
+agent workspaces are decided as before.
+
+Origin: vendor
+Forwarded: no
+Last-Update: 2026-10-05
+X-Rungic-Status: Inappropriate; Android host integration
+X-Rungic-Tests: L1:android-cross-build (host); runtime: KWin CPU with the screen off (docs/96)
+X-Rungic-Docs: docs/96
+---
+ src/android/backend/wayland/seat.rs | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/android/backend/wayland/seat.rs b/src/android/backend/wayland/seat.rs
+index e1d3f23..5ed3f9f 100644
+--- a/src/android/backend/wayland/seat.rs
++++ b/src/android/backend/wayland/seat.rs
+@@ -1334,7 +1334,11 @@ impl AndroidSeatRuntime {
+     /// KWin renders the next frame of an output as soon as the previous one is reported
+     /// presented or discarded (at most two pending). A paced output's superseded frames are
+     /// therefore reported discarded only at its next turn, else KWin would render at its own
+-    /// rate and throw most frames away (docs/65).
++    /// rate and throw most frames away (docs/65). The same while the phone surface is gone
++    /// (screen off, app in the background): nothing is presented then, and discarding each
++    /// superseded frame at once let KWin composite every client update (a blinking cursor) for
++    /// nothing; held, KWin stops at two pending frames until the surface is back and render_all
++    /// reports them discarded.
+     fn hold_superseded_while_paced(&self) {
+         use smithay::wayland::compositor::with_states;
+         use smithay::wayland::presentation::PresentationFeedbackCachedState;
+@@ -1343,7 +1347,8 @@ impl AndroidSeatRuntime {
+                 states.cached_state.get::<PresentationFeedbackCachedState>().current().hold_superseded = hold;
+             });
+         };
+-        let (phone, cast) = (self.pacing.phone_interval.is_some(), self.pacing.cast_interval.is_some());
++        let phone = self.pacing.phone_interval.is_some() || !engine_timing::is_rendering_active();
++        let cast = self.pacing.cast_interval.is_some();
+         let presented = self.presented_surface().cloned();
+         for elem in self.space.elements() {
+             if let Some(surface) = elem.0.wl_surface() {
