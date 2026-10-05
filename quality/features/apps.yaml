@@ -837,9 +837,9 @@ features:
         docs: [docs/36-firefox-input-fix.md]
       - text: KGSL 没有 DRM 节点，Firefox 会误判软件显卡。策略里把 gfx.webrender.all 设为可更改的默认 true。
         docs: [docs/research/74-vaapi-feasibility.md]
-      - text: 用 RUNGIC_WORKSPACE 判断桌面，不能用 PLASMA_PLATFORM（它会由 startplasma 串进工作区的 systemd 环境）。一个 Firefox 配置文件只能在一个会话里运行，第二个会话的 Firefox 也够不着第一个（另一个显示和会话总线），只报「已在运行」；所以工作区用自己的配置文件（/usr/bin/firefox 的 --profile），独立桌面不再链接用户的 mozilla 目录（rungic-desktop-dirs）。
+      - text: 用 RUNGIC_WORKSPACE 判断桌面，不能用 PLASMA_PLATFORM（它会由 startplasma 串进工作区的 systemd 环境）。一个 Firefox 配置文件只能在一个会话里运行，第二个会话的 Firefox 也够不着第一个（另一个显示和会话总线），只报「已在运行」；所以工作区用自己的配置文件（/usr/bin/firefox 的 --profile，按工作区编号放在 ~/.local/state/rungic-workspaces/<N>/firefox；经 rungic-workspace-env 启动的程序带着用户的 XDG_CONFIG_HOME），独立桌面不再链接用户的 mozilla 目录（rungic-desktop-dirs）。
         docs: [docs/research/97-headless-agent-work.md]
-      - text: 工作区的配置文件每次启动前从用户的复制 cookie、key4.db、logins.json、cert9.db 和证书例外，正在运行时不动；复制失败只记一行，不拦 Firefox。用户在 about:config 里改的设置不再带到工作区；网站记在 cookie 里的移动版可能还会跳。
+      - text: 工作区的配置文件每次启动前从用户的复制 cookie、key4.db、logins.json、cert9.db 和证书例外，正在运行时不动；复制失败只记一行，不拦 Firefox。用户的 Firefox 运行时锁着 cookies.sqlite，对它直接用 SQLite 备份会一直等锁：先按文件复制再检查副本。用户在 about:config 里改的设置不再带到工作区；网站记在 cookie 里的移动版可能还会跳。
         docs: [docs/research/97-headless-agent-work.md]
       - text: Firefox 156 的 WebRender 在 Linux 上只有 OpenGL 和软件路径，没有 Vulkan 合成选项。
         docs: [docs/56-kwin-vulkan-quantification.md]

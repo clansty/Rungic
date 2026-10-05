@@ -67,19 +67,37 @@ def running(profile: Path) -> bool:
 
 
 def copy_database(source: Path, target: Path) -> None:
+    """A consistent copy of a database the user's Firefox may hold open. Firefox keeps a lock on
+    cookies.sqlite while it runs, and SQLite's backup of it waited for that lock without end (the
+    G100 S, 2026-10-05): the files (the database and its write-ahead log) are copied as they are,
+    the copy is opened and checked on its own, then saved into the profile. A copy caught in the
+    middle of a write fails its check and is taken again."""
     part = target.with_name(target.name + '.rungic-part')
-    part.unlink(missing_ok=True)
-    src = sqlite3.connect(f'file:{source}?mode=ro', uri=True, timeout=2)
-    try:
-        dst = sqlite3.connect(part)
+    stage = target.with_name(target.name + '.rungic-stage')
+    for attempt in range(3):
+        for path in (part, stage, Path(str(stage) + '-wal'), Path(str(stage) + '-shm')):
+            path.unlink(missing_ok=True)
+        shutil.copyfile(source, stage)
+        if Path(str(source) + '-wal').exists():
+            shutil.copyfile(str(source) + '-wal', str(stage) + '-wal')
         try:
-            src.backup(dst)
-            if dst.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                raise sqlite3.DatabaseError('copy failed its check')
-        finally:
-            dst.close()
-    finally:
-        src.close()
+            src = sqlite3.connect(stage, timeout=1)
+            try:
+                if src.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                    raise sqlite3.DatabaseError('copy failed its check')
+                dst = sqlite3.connect(part)
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            break
+        except sqlite3.DatabaseError:
+            if attempt == 2:
+                raise
+    for path in (stage, Path(str(stage) + '-wal'), Path(str(stage) + '-shm')):
+        path.unlink(missing_ok=True)
     for suffix in ('-wal', '-shm', '-journal'):
         Path(str(target) + suffix).unlink(missing_ok=True)
     os.replace(part, target)
@@ -95,7 +113,8 @@ def seed(profile: Path, user: Path) -> list[str]:
                 copy_database(user / name, profile / name)
             except (sqlite3.Error, OSError) as error:
                 failed.append(f'{name}: {error}')
-                (profile / (name + '.rungic-part')).unlink(missing_ok=True)
+                for leftover in profile.glob(name + '.rungic-*'):
+                    leftover.unlink(missing_ok=True)
     for name in FILES:
         if (user / name).is_file():
             try:

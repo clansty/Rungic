@@ -54,13 +54,36 @@ def test_the_users_sign_ins_are_copied_into_the_workspace_profile(tmp_path, monk
     m = load()
     user = user_profile(tmp_path)
     assert m.user_profile(tmp_path, tmp_path / '.config') == user     # the install's default, not Default=1
-    target = tmp_path / '.local/state/rungic-workspaces/1/config/mozilla/firefox/rungic-workspace'
+    target = tmp_path / '.local/state/rungic-workspaces/1/firefox'
     assert m.seed(target, user) == []
     rows = sqlite3.connect(target / 'cookies.sqlite').execute('SELECT value FROM moz_cookies').fetchall()
     assert rows == [('signed-in',)]
     assert json.loads((target / 'logins.json').read_text())['logins'][0]['hostname'] == 'https://github.com'
     assert sqlite3.connect(target / 'key4.db').execute('SELECT count(*) FROM metadata').fetchone() == (1,)
     assert not list(target.glob('*.rungic-part'))
+
+
+# covers: apps.firefox/E7
+def test_a_database_the_users_firefox_holds_is_still_copied(tmp_path, monkeypatch):
+    # The user's Firefox holds cookies.sqlite while it runs; SQLite's backup waited for it without end.
+    monkeypatch.setenv('HOME', str(tmp_path))
+    m = load()
+    user = user_profile(tmp_path)
+    holder = subprocess.Popen(['python3', '-c', 'import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); '
+                               'db.execute("PRAGMA locking_mode=EXCLUSIVE"); db.execute("BEGIN EXCLUSIVE"); '
+                               'db.execute("INSERT INTO moz_cookies VALUES (\'.x\', \'y\', \'z\')"); '
+                               'print("held", flush=True); time.sleep(30)', str(user / 'cookies.sqlite')],
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == 'held'
+        child = subprocess.run(['python3', str(SCRIPT), str(tmp_path / 'ws')], timeout=20,
+                               env=dict(os.environ, HOME=str(tmp_path)), capture_output=True, text=True)
+        assert child.returncode == 0, child.stderr
+        rows = sqlite3.connect(tmp_path / 'ws/cookies.sqlite').execute('SELECT value FROM moz_cookies').fetchall()
+        assert ('signed-in',) in rows
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 # covers: apps.firefox/E7
@@ -121,9 +144,12 @@ def wrapper(tmp_path, env, *args):
 
 # covers: apps.firefox/E7
 def test_the_wrapper_gives_a_workspace_its_own_profile(tmp_path):
-    config = tmp_path / 'ws-config'
-    args, seeded = wrapper(tmp_path, {'RUNGIC_WORKSPACE': '0', 'XDG_CONFIG_HOME': str(config)}, 'https://example.org')
-    profile = str(config / 'mozilla/firefox/rungic-workspace')
+    # By the workspace's number under ~/.local/state, whatever XDG_CONFIG_HOME the caller has: on the
+    # G100 S rungic-workspace-env kept the user's, and the profile landed in the user's mozilla directory.
+    home = tmp_path / 'home'
+    args, seeded = wrapper(tmp_path, {'RUNGIC_WORKSPACE': '1', 'HOME': str(home),
+                                      'XDG_CONFIG_HOME': str(home / '.config')}, 'https://example.org')
+    profile = str(home / '.local/state/rungic-workspaces/1/firefox')
     assert args == ['--profile', profile, 'https://example.org']
     assert seeded == profile                       # seeded first; its failure (exit 3) did not stop Firefox
 

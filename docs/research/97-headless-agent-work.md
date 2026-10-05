@@ -951,8 +951,8 @@ APK 进程提供：`platform.sock`、`capture.sock`、`codec.sock`、`wayland-0`
 - **同一个 Firefox、两个屏幕各开窗口**：做不到。一个 Firefox 进程只连一个 Wayland 显示，各个空间是独立的 KWin。
 - **对照**：Grok Bot 一个账号只有一台云端电脑，所有 Bot 共享浏览器配置和登录，官方说明不按 Bot 隔离；有用户报告每个 Agent 的浏览器窗口仍要单独登录。技术细节没有公开。
 - **方案**（用户批准 1、2；不采用「提示被占用、一键收回」，要保证两边任何时候都能打开）：
-  1. 各用一份配置文件：0 号不再链接 `mozilla`（rungic-desktop-dirs 的私有项，已有的链接在下次启动时去掉）。在工作区里，`/usr/bin/firefox` 发现 `RUNGIC_WORKSPACE` 非空且调用方没有指定配置文件时，用 `--profile $XDG_CONFIG_HOME/mozilla/firefox/rungic-workspace`。
-  2. 登录状态单向复制：启动前由 `/usr/libexec/rungic-firefox-workspace-profile` 从用户的默认配置文件（`installs.ini` 的默认项，否则 `Default=1`）复制 `cookies.sqlite`、`key4.db`、`cert9.db`（SQLite 备份接口，用户的 Firefox 开着也一致）和 `logins.json`、`cert_override.txt`。工作区的 Firefox 正在运行时（`.parentlock` 被锁）不动。复制失败只在 stderr 记一行，Firefox 照常启动。Agent 在工作区里新登录的不写回用户的配置文件，下一次启动又从用户的重新复制。
+  1. 各用一份配置文件：0 号不再链接 `mozilla`（rungic-desktop-dirs 的私有项，已有的链接在下次启动时去掉）。在工作区里，`/usr/bin/firefox` 发现 `RUNGIC_WORKSPACE` 非空且调用方没有指定配置文件时，用 `--profile ~/.local/state/rungic-workspaces/<N>/firefox`（按工作区编号定位置：经 `rungic-workspace-env` 启动的程序沿用调用方的 `XDG_CONFIG_HOME`，也就是用户的；第一次实机测试时配置文件因此建到了用户的 mozilla 目录里）。
+  2. 登录状态单向复制：启动前由 `/usr/libexec/rungic-firefox-workspace-profile` 从用户的默认配置文件（`installs.ini` 的默认项，否则 `Default=1`）复制 `cookies.sqlite`、`key4.db`、`cert9.db` 和 `logins.json`、`cert_override.txt`。数据库先连同预写日志按文件原样复制，再单独打开副本检查、存进配置文件；中途被写坏的副本检查不过就重取，最多三次。不直接对用户的数据库用 SQLite 备份接口：用户的 Firefox 运行时锁着 `cookies.sqlite`，第一次实机测试时备份一直等这把锁，Firefox 启动不了。工作区的 Firefox 正在运行时（`.parentlock` 被锁）不动。复制失败只在 stderr 记一行，Firefox 照常启动。Agent 在工作区里新登录的不写回用户的配置文件，下一次启动又从用户的重新复制。
   3. Firefox 从 `switch.py` 的单实例名单里去掉：Agent 打开 Firefox 时不再先关掉用户的。
 - **代价**：
   - 用户在 `about:config` 里的设置不再带到工作区。

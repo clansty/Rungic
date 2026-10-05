@@ -11,7 +11,10 @@ if [ -n "${RUNGIC_WORKSPACE:-}" ]; then
     case " $* " in
         *" -P "*|*" -p "*|*" --profile "*|*" -profile "*|*" --ProfileManager "*|*" -ProfileManager "*) ;;
         *)
-            profile=${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox/rungic-workspace
+            # By the workspace's number: programs started through rungic-workspace-env keep the
+            # caller's XDG_CONFIG_HOME (the user's), and a workspace's own XDG_STATE_HOME differs
+            # between its session and those programs.
+            profile=$HOME/.local/state/rungic-workspaces/$RUNGIC_WORKSPACE/firefox
             /usr/libexec/rungic-firefox-workspace-profile "$profile" || true
             set -- --profile "$profile" "$@"
             ;;
