@@ -1,6 +1,10 @@
 #include "agentscreen.h"
 
 #include <QCoreApplication>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -21,6 +25,8 @@ const QString kSocket = qEnvironmentVariable("RUNGIC_PLATFORM_SOCKET", QStringLi
 // an ending is news only for a moment (the window shows it a few seconds).
 constexpr double kActivityStaleS = 120;
 constexpr double kEndingStaleS = 10;
+// rungic_cua.hold: a hold nobody refreshed for this long has ended (the window holding it went away).
+constexpr double kHoldStaleS = 600;
 
 // One request on the platform bridge; `timeoutMs` covers a TV connection (up to a minute).
 QJsonObject bridge(const QJsonObject &request, int timeoutMs = 3000)
@@ -50,10 +56,122 @@ AgentScreen::AgentScreen(int workspace, QObject *parent)
     QDir().mkpath(dir);
     // Each screen its own (rungic_cua.activity): workspace N's agent, or the agent on the user's desktop.
     m_activityPath = dir + (m_workspace > 0 ? QStringLiteral("/activity-ws%1.json").arg(m_workspace) : QStringLiteral("/activity.json"));
+    m_holdPath = dir + QStringLiteral("/hold-ws%1.json").arg(m_workspace);
     m_activityWatcher.addPath(dir);
     connect(&m_activityWatcher, &QFileSystemWatcher::directoryChanged, this, &AgentScreen::readActivity);
+    connect(&m_activityWatcher, &QFileSystemWatcher::directoryChanged, this, &AgentScreen::readHold);
+    // While this window holds the screen it says so again now and then (a hold nobody refreshes ends).
+    m_holdRefresh.setInterval(60000);
+    connect(&m_holdRefresh, &QTimer::timeout, this, [this] {
+        callAgent(QStringLiteral("HoldScreen"), {m_workspace, true, QString()}, [](bool, const QJsonObject &) {});
+    });
     readActivity();
+    readHold();
     poll();
+}
+
+void AgentScreen::readHold()
+{
+    QFile file(m_holdPath);
+    bool held = false;
+    if (file.open(QIODevice::ReadOnly)) {
+        const QJsonObject record = QJsonDocument::fromJson(file.readAll()).object();
+        const double refreshed = record.value(QStringLiteral("refreshed")).toDouble(record.value(QStringLiteral("since")).toDouble());
+        held = QDateTime::currentMSecsSinceEpoch() / 1000.0 - refreshed < kHoldStaleS;
+    }
+    // Asked and not answered yet: the file comes with the answer.
+    const bool here = m_heldHere && (held || m_holdAsked);
+    if (held == m_held && here == m_heldHere)
+        return;
+    m_held = held;
+    m_heldHere = here;
+    if (!here)
+        m_holdRefresh.stop();
+    Q_EMIT workChanged();
+}
+
+void AgentScreen::callAgent(const QString &method, const QVariantList &args, std::function<void(bool, const QJsonObject &)> done)
+{
+    QDBusMessage message = QDBusMessage::createMethodCall(QStringLiteral("com.rungic.VoiceAgent"), QStringLiteral("/com/rungic/VoiceAgent"),
+                                                          QStringLiteral("com.rungic.VoiceAgent"), method);
+    message.setArguments(args);
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message, 40000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [watcher, done] {
+        QDBusPendingReply<QString> reply = *watcher;
+        watcher->deleteLater();
+        if (reply.isError()) {
+            done(false, {{QStringLiteral("error"), reply.error().message()}});
+            return;
+        }
+        done(true, QJsonDocument::fromJson(reply.value().toUtf8()).object());
+    });
+}
+
+void AgentScreen::queryWork()
+{
+    if (m_querying)
+        return;
+    m_querying = true;
+    callAgent(QStringLiteral("ScreenWork"), {m_workspace}, [this](bool ok, const QJsonObject &work) {
+        m_querying = false;
+        const QString kind = ok ? work.value(QStringLiteral("kind")).toString() : QString();
+        const bool busy = ok && work.value(QStringLiteral("busy")).toBool();
+        if (kind == m_workKind && busy == m_workBusy)
+            return;
+        m_workKind = kind;
+        m_workBusy = busy;
+        Q_EMIT workChanged();
+    });
+}
+
+void AgentScreen::tell(const QString &text)
+{
+    if (text.trimmed().isEmpty())
+        return;
+    callAgent(QStringLiteral("SteerScreen"), {m_workspace, text}, [this](bool ok, const QJsonObject &done) {
+        Q_EMIT controlDone(QStringLiteral("tell"), ok, ok ? done.value(QStringLiteral("outcome")).toString()
+                                                          : done.value(QStringLiteral("error")).toString());
+    });
+}
+
+void AgentScreen::stopWork()
+{
+    callAgent(QStringLiteral("StopScreen"), {m_workspace}, [this](bool ok, const QJsonObject &done) {
+        const bool stopped = ok && done.value(QStringLiteral("stopped")).toBool();
+        Q_EMIT controlDone(QStringLiteral("stop"), stopped || done.value(QStringLiteral("asked")).toBool(),
+                           done.value(QStringLiteral("asked")).toBool() ? QStringLiteral("asked") : done.value(QStringLiteral("error")).toString());
+        queryWork();
+    });
+}
+
+void AgentScreen::takeOver()
+{
+    if (m_heldHere)
+        return;
+    m_heldHere = m_holdAsked = true;      // at once: the next touch must not ask again
+    m_holdRefresh.start();
+    callAgent(QStringLiteral("HoldScreen"), {m_workspace, true, QString()}, [this](bool ok, const QJsonObject &done) {
+        m_holdAsked = false;
+        if (!ok) {
+            m_heldHere = false;
+            m_holdRefresh.stop();
+        }
+        readHold();
+        Q_EMIT controlDone(QStringLiteral("hold"), ok, done.value(QStringLiteral("error")).toString());
+    });
+}
+
+void AgentScreen::giveBack(const QString &note)
+{
+    if (!m_held)
+        return;
+    m_holdRefresh.stop();
+    callAgent(QStringLiteral("HoldScreen"), {m_workspace, false, note}, [this](bool ok, const QJsonObject &done) {
+        m_heldHere = false;
+        readHold();
+        Q_EMIT workChanged();
+        Q_EMIT controlDone(QStringLiteral("back"), ok, done.value(QStringLiteral("error")).toString());
+    });
 }
 
 void AgentScreen::readActivity()
@@ -97,6 +215,13 @@ void AgentScreen::readActivity()
 AgentScreen::~AgentScreen()
 {
     setFullscreen(false);
+    if (m_heldHere) {
+        // The window goes: the screen goes back to the agent (a hold must not outlive its holder).
+        QDBusMessage message = QDBusMessage::createMethodCall(QStringLiteral("com.rungic.VoiceAgent"), QStringLiteral("/com/rungic/VoiceAgent"),
+                                                              QStringLiteral("com.rungic.VoiceAgent"), QStringLiteral("HoldScreen"));
+        message.setArguments({m_workspace, false, QString()});
+        QDBusConnection::sessionBus().call(message, QDBus::Block, 3000);
+    }
 }
 
 QString AgentScreen::fullscreenMark() const
@@ -136,6 +261,9 @@ void AgentScreen::poll()
 {
     if (m_activityState == QLatin1String("working"))
         readActivity();  // goes stale when nothing reports any more
+    readHold();
+    if (m_status != QLatin1String("off"))
+        queryWork();
     if (m_workspace == 0) {
         // Desktop mode is on while the independent desktop runs (rungic-desktop-mode, docs/research/97
         // §19); the bridge only says whether a TV shows it (computer mode), and may not answer.
@@ -309,6 +437,8 @@ void AgentScreen::setTvShown(bool shown)
 
 void AgentScreen::typeText(const QString &text)
 {
+    if (!text.isEmpty() && m_workspace > 0 && m_workBusy && !m_held)
+        takeOver();
     if (!text.isEmpty())
         send(QStringLiteral("text ") + QString::fromLatin1(text.toUtf8().toBase64()));
 }
@@ -332,6 +462,10 @@ void AgentScreen::pointerMove(double fx, double fy)
 
 void AgentScreen::pointerButton(int button, bool pressed)
 {
+    // The user's finger on an assistant's screen while its agent works there: the user takes it over,
+    // or the two would fight over one pointer (docs/114). Given back from the director, or on leaving.
+    if (pressed && m_workspace > 0 && m_workBusy && !m_held)
+        takeOver();
     send(QStringLiteral("button %1 %2").arg(button).arg(pressed ? 1 : 0));
 }
 

@@ -313,6 +313,36 @@ features:
       - tools/test_task_state.py
     docs: [docs/89-agent-progress.md, docs/88-agent-visible-work.md, docs/research/92-agent-task-speed.md]
 
+  - id: agent.task-control
+    title: 随时介入正在做的任务
+    scenario: agent.talk
+    status: experimental
+    platform: linux
+    interfaces: [platform-bridge]
+    summary: 按住说话、电话和导播台共用一套控制：给正在做的任务补一句话不会丢，停止要确认真的停下，用户可以在导播台接手一块屏再交还，服务重启后接着做。
+    experience:
+      - id: E1
+        text: 在导播台全屏里点“接手”，或在助理工作时直接触摸它的屏幕，就接手了这块屏：助理的桌面工具不再操作这块屏（还能看），屏上显示“你在操作 · 助理在等”。点“交还”或离开全屏就交还；助理下一步先看屏幕，不撤销用户做的事。持有它的窗口没了，10 分钟后自动交还。
+      - id: E2
+        text: 给正在做的任务的话（电话里的更正、导播台的“告诉助理”）先存到盘上再送：送进正在跑的那一轮；那一轮刚好结束，就在同一线程开新一轮带上这句话，任务接着做；Codex 暂时不在，就保存起来，等这一轮结束或服务重启后再送。话不会丢。
+      - id: E3
+        text: 停止（按住说话的停止按钮、导播台的停止）在 Codex 确认这一轮已结束后才显示“已停下”；确认不了就说没停下。停止时也丢掉为这个任务存着的话，不会被它们重新启动。
+      - id: E4
+        text: 服务重启时正在做的工作记在盘上。30 分钟内中断的，重启后在原来的线程接着做（并行任务回到它的工作区，组长重新叫起没做完的成员），对话里说明一句；更早的只说明，用户说“继续”再接着做。
+      - id: E5
+        text: 有任务在某块屏上工作时，导播台的工具栏多出“告诉助理”“接手”“停止”。“告诉助理”在顶部输入，话只送到这块屏上的任务。团队成员的屏由组长转达，停止成员也由组长执行。
+    pitfalls:
+      - text: Codex app-server 是语音服务的子进程，服务重启时正在跑的回合随之中断；线程记录里这一轮仍显示 inProgress，要看线程状态是否 active 才知道是否真在跑。
+        docs: [docs/114-task-control.md]
+      - text: 一个工作区的占用超过 20 分钟没有刷新就会失效。并行任务做得久（一幅画画了半小时）时会失去工作区，现在每次有进展都会刷新占用。
+        docs: [docs/114-task-control.md]
+    code:
+      - agent/assistant/task_control.py
+      - agent/computer-use/rungic_cua/hold.py
+      - tools/tests/test_task_control.py
+      - tools/test_hold.py
+      - tools/system/tests/screen_controls.py
+    docs: [docs/114-task-control.md]
   - id: agent.phone-mode
     title: Agent 电话模式
     scenario: agent.talk
@@ -354,7 +384,7 @@ features:
       - id: E11
         text: 按用户实际说的语言识别和回答，不强制用桌面界面的语言。
       - id: E12
-        text: 服务重启后不重放排队中或做到一半的任务，按后端的实际状态恢复显示（标为已中断）。
+        text: 服务重启后不重放排队中的任务。做到一半的工作按 agent.task-control/E4 接着做，其余按后端的实际状态显示（标为已中断），已断开的回合不显示为进行中。
       - id: E13
         text: 对话顶栏的电话按钮在当前对话里开始通话，对话列表的“和 Agent 通话”新开一段对话再开始。不能开始时（Agent 正在替你打电话、另一段对话在通话）按钮显示为不可用，点一下说明原因。
       - id: E14

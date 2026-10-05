@@ -33,7 +33,7 @@ import time
 from itertools import count
 from pathlib import Path
 
-from . import team, workspace
+from . import hold, team, workspace
 
 # Set apart in a workspace, as Plasma's desktop session has them (docs/103); the user's session's
 # values go along as RUNGIC_USER_<name>.
@@ -237,6 +237,7 @@ class Router:
         self.member: dict | None = None      # its last team_post: role, kind, project (team.py)
         self.thread: str = ''                # its Codex thread (the murmur follows its log)
         self.murmur = None
+        self.gate = hold.Gate()              # the user's take-overs of a screen (docs/114)
 
     def caller(self, meta: dict | None) -> None:
         """Who calls, from the first call's _meta (Codex 0.159: x-codex-turn-metadata)."""
@@ -335,6 +336,9 @@ class Router:
         if name == CLOSE_TOOL['name']:
             # The child in the workspace goes with it; the next call starts both again.
             slot = self.slot
+            news = self.gate.check(slot, name)
+            if news:
+                return {'content': [{'type': 'text', 'text': news}]}
             self.drop('workspace')
             data = workspace.close(slot, force=bool(arguments.get('force')))
             if self.subagent and data.get('closed'):
@@ -344,11 +348,18 @@ class Router:
                 self.last = None
             return {'content': [{'type': 'text', 'text': json.dumps(data, ensure_ascii=False)}]}
         target, why = self.where()
+        # The user took this screen over in the director (docs/114): acting waits for it, and the
+        # agent hears once that the user gave it back.
+        news = self.gate.check(self.slot if target == 'workspace' else 0, name)
+        if news and name in hold.ACTING:
+            return {'content': [{'type': 'text', 'text': news}]}
         if target == 'workspace':
             workspace.thaw(self.slot)
             self.at_work()
             self.follow_murmur()
         result = self.child(target).request('tools/call', {'name': name, 'arguments': arguments})
+        if news:
+            result = {**result, 'content': [*result.get('content', []), {'type': 'text', 'text': news}]}
         if result.get('isError') and any(STALE_BUS in str(c.get('text', '')) for c in result.get('content', [])):
             # A bus gone under the child: once more with a new child.
             self.drop(target)

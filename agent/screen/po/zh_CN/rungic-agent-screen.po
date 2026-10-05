@@ -210,3 +210,56 @@ msgstr "电视上的桌面"
 msgctxt "@info:status an app of the desktop asks for the password; tap to answer it in fullscreen"
 msgid "Authentication needed · tap to answer in fullscreen"
 msgstr "需要授权 · 点此全屏后输入"
+
+#: qml/Main.qml
+msgctxt "@info the user's words did not reach the assistant; %1 why"
+msgid "Not passed on: %1"
+msgstr "没能转达：%1"
+
+msgctxt "@info"
+msgid "Noted. The assistant gets it as soon as it can."
+msgstr "记下了，助理能接收时马上转达。"
+
+msgctxt "@info the user's words reached the assistant"
+msgid "Passed on"
+msgstr "已转达"
+
+msgctxt "@info"
+msgid "The task did not stop. Try again."
+msgstr "任务没有停下，请再试一次。"
+
+msgctxt "@info a team member is stopped by its lead"
+msgid "Asked the lead to stop this member"
+msgstr "已请组长停下这名成员"
+
+msgctxt "@info"
+msgid "Stopped"
+msgstr "已停下"
+
+msgctxt "@info the user took the screen over"
+msgid "You have the screen. The assistant waits."
+msgstr "你接手了这块屏，助理先等着。"
+
+msgctxt "@info"
+msgid "Could not take over"
+msgstr "没能接手"
+
+msgctxt "@info the user gave the screen back"
+msgid "Given back. The assistant looks at the screen, then goes on."
+msgstr "已交还，助理先看一眼屏幕再继续。"
+
+msgctxt "@info:placeholder words for a team member, passed on by its lead"
+msgid "Tell this member (through the lead)…"
+msgstr "对这名成员说（由组长转达）…"
+
+msgctxt "@info:placeholder words for the assistant at work on this screen"
+msgid "Tell the assistant…"
+msgstr "告诉助理…"
+
+msgctxt "@info:status the user operates the assistant's screen; the assistant waits"
+msgid "You have the screen · the assistant waits"
+msgstr "你在操作 · 助理在等"
+
+msgctxt "@action:button give the screen back to the assistant"
+msgid "Give back"
+msgstr "交还"

@@ -21,6 +21,10 @@
 // Caption (docs/88): while the assistant works on this screen, what it is doing now sits over the
 // bottom of the picture (its dot breathes on the tab); how it ended shows for a few seconds.
 // While a TV or the phone's fullscreen presents the screen everything hides; then it comes back.
+// Control of the work on a screen (docs/114): while a task works on it, the toolbar has Tell (words
+// for that task, typed in a bar at the top; they reach it however busy it is), Take over / Give back
+// (the agent's desktop tools wait while the user has the screen; a touch on it while the agent works
+// takes it over; leaving fullscreen gives it back) and Stop (said "stopped" only once it has).
 import QtCore
 import QtQuick
 import QtQuick.Effects
@@ -116,6 +120,71 @@ Window {
         settle()
     }
     // The close button: this screen, or the director's every screen (Director.close, 2026-10-05).
+    // ---- control of the work on this screen (docs/114) ------------------------------------------------
+    // A task works here: on an assistant's screen, or the agent at work on the user's desktop.
+    readonly property bool controls: !!root.screen && !!root.screen.workKind
+                                     && (root.screen.workspace > 0 || root.screen.activityState === "working")
+    property bool telling: false
+    property string notice: ""
+    function openTell() {
+        root.telling = true
+        if (!root.full)
+            root.setFullscreen()
+        else
+            root.focusTell()
+    }
+    function focusTell() {
+        root.typing = true
+        tellField.forceActiveFocus()
+    }
+    function sendTell() {
+        const text = (tellField.text + tellField.preeditText).trim()
+        if (text !== "")
+            root.screen.tell(text)
+        tellField.text = ""
+        root.telling = false
+        root.typing = false
+    }
+    function tellKey(code) {
+        if (code === 28)
+            root.sendTell()
+        else if (code === 1) {
+            root.telling = false
+            root.typing = false
+        }
+    }
+    function say(text) {
+        root.notice = text
+        noticeTimer.restart()
+    }
+    Timer { id: noticeTimer; interval: 3500; onTriggered: root.notice = "" }
+    Connections {
+        target: root.screen && root.screen.controlDone ? root.screen : null
+        ignoreUnknownSignals: true
+        function onControlDone(what, ok, detail) {
+            if (what === "tell")
+                root.say(!ok ? i18nc("@info the user's words did not reach the assistant; %1 why", "Not passed on: %1", detail)
+                         : detail === "queued" ? i18nc("@info", "Noted. The assistant gets it as soon as it can.")
+                         : i18nc("@info the user's words reached the assistant", "Passed on"))
+            else if (what === "stop")
+                root.say(!ok ? i18nc("@info", "The task did not stop. Try again.")
+                         : detail === "asked" ? i18nc("@info a team member is stopped by its lead", "Asked the lead to stop this member")
+                         : i18nc("@info", "Stopped"))
+            else if (what === "hold")
+                root.say(ok ? i18nc("@info the user took the screen over", "You have the screen. The assistant waits.")
+                         : i18nc("@info", "Could not take over"))
+            else if (what === "back")
+                root.say(i18nc("@info the user gave the screen back", "Given back. The assistant looks at the screen, then goes on."))
+        }
+    }
+    function controlActions() {
+        if (!root.controls)
+            return []
+        return [{ icon: "document-edit", act: () => root.openTell() },
+                { icon: "transform-browse", checked: root.screen.held,
+                  act: () => root.screen.held ? root.screen.giveBack("") : root.screen.takeOver() }]
+               .concat(root.screen.workBusy ? [{ icon: "media-playback-stop", act: () => root.screen.stopWork() }] : [])
+    }
     function closeScreens() { if (root.directing) director.close(); else root.screen.close() }
 
     // ---- the director's focus changes (docs/58) ----------------------------------------------------
@@ -540,14 +609,21 @@ Window {
     }
     property bool typing: false
     onFullChanged: {
-        if (!full)
+        if (!full) {
             typing = false
+            telling = false
+            // Leaving fullscreen ends the user's hand on the screen: the agent goes on.
+            if (root.screen && root.screen.heldHere)
+                root.screen.giveBack("")
+        } else if (telling) {
+            Qt.callLater(root.focusTell)
+        }
         if (root.screen)
             root.screen.setFullscreen(full)   // desktop mode's: what its quick setting shows
     }
     onTypingChanged: {
         if (typing) {
-            keyboardField.forceActiveFocus()
+            (root.telling ? tellField : keyboardField).forceActiveFocus()
             Qt.inputMethod.show()
         } else {
             escapeKey.forceActiveFocus()
@@ -1071,9 +1147,103 @@ Window {
         sourceComponent: FloatingKeyboard {
             area: stage
             place: root.screen && root.screen.workspace === 0 ? "desktop" : "screens"
-            composing: keyboardField.preeditText
-            onKeyWanted: (code) => root.sendKey(code)
+            composing: (root.telling ? tellField : keyboardField).preeditText
+            onKeyWanted: (code) => root.telling ? root.tellKey(code) : root.sendKey(code)
             onHideWanted: root.typing = false
+        }
+    }
+
+    // ---- Tell: the user's words for the work on this screen (docs/114), typed with the keyboard ------
+    Rectangle {
+        id: tellBar
+        visible: root.full && root.telling && !root.morphing
+        width: Math.min(620, stage.width * 0.72)
+        height: 48
+        radius: height / 2
+        x: Math.round((stage.width - width) / 2)
+        y: 16
+        z: 5
+        color: Qt.rgba(0.11, 0.12, 0.15, 0.92)
+        border.color: Qt.rgba(1, 1, 1, 0.22)
+        border.width: 1
+        TapHandler { gesturePolicy: TapHandler.WithinBounds; onTapped: root.focusTell() }
+        TextInput {
+            id: tellField
+            anchors { left: parent.left; right: send.left; verticalCenter: parent.verticalCenter; leftMargin: 20; rightMargin: 8 }
+            color: "white"
+            font.pixelSize: 17
+            clip: true
+            inputMethodHints: Qt.ImhNoAutoUppercase
+            onAccepted: root.sendTell()
+            Text {
+                anchors.fill: parent
+                verticalAlignment: Text.AlignVCenter
+                visible: tellField.text === "" && tellField.preeditText === ""
+                text: root.screen && root.screen.workKind === "member"
+                      ? i18nc("@info:placeholder words for a team member, passed on by its lead", "Tell this member (through the lead)…")
+                      : i18nc("@info:placeholder words for the assistant at work on this screen", "Tell the assistant…")
+                color: Qt.rgba(1, 1, 1, 0.5)
+                font.pixelSize: 17
+                elide: Text.ElideRight
+            }
+        }
+        Kirigami.Icon {
+            id: send
+            anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter }
+            width: 26; height: 26
+            source: "document-send"
+            color: "white"
+            isMask: true
+            TapHandler { onTapped: root.sendTell() }
+        }
+    }
+    // The user has the screen (Take over, or a touch while the agent worked): the agent waits.
+    Rectangle {
+        id: heldChip
+        visible: !!root.screen && !!root.screen.held && !tellBar.visible && root.mode !== "tab" && !root.morphing
+        z: 5
+        height: 36
+        radius: height / 2
+        width: heldRow.implicitWidth + 28
+        x: root.full ? Math.round((stage.width - width) / 2) : panel.x + Math.round((panel.width - width) / 2)
+        y: root.full ? 16 : panel.y + 8
+        color: Qt.rgba(0.88, 0.66, 0.24, 0.94)
+        Row {
+            id: heldRow
+            anchors.centerIn: parent
+            spacing: 12
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: i18nc("@info:status the user operates the assistant's screen; the assistant waits", "You have the screen · the assistant waits")
+                color: "#1b1c1f"
+                font.pixelSize: 14
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: i18nc("@action:button give the screen back to the assistant", "Give back")
+                color: "#1b1c1f"
+                font.pixelSize: 14
+                font.bold: true
+                TapHandler { onTapped: root.screen.giveBack("") }
+            }
+        }
+    }
+    // What came of a control (passed on, stopped...), for a few seconds.
+    Rectangle {
+        visible: root.notice !== "" && root.mode !== "tab"
+        z: 6
+        height: 34
+        radius: height / 2
+        width: noticeText.implicitWidth + 32
+        x: root.full ? Math.round((stage.width - width) / 2) : panel.x + Math.round((panel.width - width) / 2)
+        y: root.full ? stage.height - 120 : panel.y + panel.height - height - 10
+        color: Qt.rgba(0.11, 0.12, 0.15, 0.92)
+        Text {
+            id: noticeText
+            anchors.centerIn: parent
+            text: root.notice
+            color: "white"
+            font.pixelSize: 14
         }
     }
 
@@ -1091,6 +1261,7 @@ Window {
            : root.barAbove ? panel.y - root.gap - height : panel.y + panel.height + root.gap
         actions: root.full
             ? [{ icon: "view-restore", act: () => root.leaveFullscreen() }]
+              .concat(root.controlActions())
               .concat(root.directing && root.others > 0 ? [{ icon: "zoom-in", act: () => director.nextLevel() }] : [])
               // Touchpad or direct touch (the APK's fullscreen had it; remembered).
               .concat([{ icon: "input-touchpad", checked: fullscreenSettings.touchpad,
@@ -1099,10 +1270,13 @@ Window {
               .concat([{ icon: "input-keyboard", checked: root.typing, act: () => { root.typing = !root.typing } }])
               .concat([{ icon: "video-television", act: () => { root.leaveFullscreen(); root.screen.castToTv() } },
                        { icon: "window-close", act: () => { root.leaveFullscreen(); root.closeScreens() } }])
-            : [{ icon: "view-fullscreen", act: () => root.setFullscreen() },
+            : [{ icon: "view-fullscreen", act: () => root.setFullscreen() }]
+              .concat(root.controls ? [{ icon: "document-edit", act: () => root.openTell() }] : [])
+              .concat(root.controls && root.screen.workBusy ? [{ icon: "media-playback-stop", act: () => root.screen.stopWork() }] : [])
+              .concat([
                { icon: "video-television", act: () => root.screen.castToTv() },
                { icon: root.onLeftHalf ? "go-previous" : "go-next", act: () => root.tuck(root.onLeftHalf ? "left" : "right") },
-               { icon: "window-close", act: () => root.closeScreens() }]
+               { icon: "window-close", act: () => root.closeScreens() }])
         onUsed: root.showToolbar()
     }
 

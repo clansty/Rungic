@@ -10,6 +10,7 @@ sys.path.insert(0, str(MODULE.parent))      # task_state, as the service finds i
 spec = importlib.util.spec_from_file_location('phone_session', MODULE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+import task_control  # noqa: E402 - beside phone_session, as the service has it
 
 
 def bridge(settings=None):
@@ -19,7 +20,7 @@ def bridge(settings=None):
     obj.lock = threading.RLock()
     obj.threads = {}
     obj.cards, obj.card_timers = {}, {}
-    obj.executor, obj.shared, obj.side_slots = None, {}, {}
+    obj.executor, obj.shared, obj.side_slots, obj.side_home, obj.claim_touched = None, {}, {}, {}, {}
     obj.emit = lambda event, keep=True: None
     obj.history = lambda conversation: []
     return obj
@@ -204,10 +205,25 @@ def test_a_phone_task_is_tracked_as_a_turn():
 
 
 class Executor:
-    """VoiceAgent as a call's executor: the conversation's own thread and its running turn."""
+    """VoiceAgent as a call's executor: the conversation's own thread and its running turn, and its
+    TaskControl (task_control.py), which knows the running turn from Codex's notifications."""
     def __init__(self, running=None):
+        self.control = task_control.TaskControl(lambda: None, Path('/nonexistent/task-control.json'),
+                                                params=self.turn_params, log=lambda *a: None)
+        self.control._save = lambda: None
         self.running = running
         self.opened = []
+
+    @property
+    def running(self):
+        return self.control.running('main-thread')
+
+    @running.setter
+    def running(self, turn):
+        if turn:
+            self.control.turns['main-thread'] = turn
+        else:
+            self.control.turns.pop('main-thread', None)
 
     def main_thread(self, conversation):
         self.opened.append(conversation)
@@ -243,6 +259,7 @@ def shared_bridge(executor, server):
     obj = bridge()
     obj.executor, obj.shared = executor, {}
     obj.server = lambda: server
+    executor.control.server = lambda: server
     written = []
     obj._write = written.append
     return obj, written
@@ -258,23 +275,27 @@ def test_work_that_acts_goes_to_the_conversation_s_own_thread():
     assert written[-1]['result'] == {'thread': {'id': 'main-thread'}, 'shared': True}
     assert executor.opened == ['c1'] and not server.calls, 'no thread of its own'
     obj._rpc({'id': 2, 'method': 'turn/start', 'params': {'threadId': 'main-thread', 'input': [{'type': 'text', 'text': 'draw'}]}})
-    assert server.calls[-1] == ('turn/start', {'threadId': 'main-thread', 'model': 'gpt-x', 'input': [{'type': 'text', 'text': 'draw'}]})
-    assert written[-1]['result'] == {'turn': {'id': 'turn-new'}}
+    method, params = server.calls[-1]
+    assert method == 'turn/start' and params.pop('clientUserMessageId').startswith('steer-')
+    assert params == {'threadId': 'main-thread', 'model': 'gpt-x', 'input': [{'type': 'text', 'text': 'draw'}]}
+    assert written[-1]['result'] == {'turn': {'id': 'turn-new'}, 'joined': False}
     # A second request while the turn works, with no workspace free for it, joins the turn, as
     # push-to-talk does (the cast and the drawing).
     executor.running = 'turn-new'
     obj._side_thread = lambda task, conversation: None
     obj._rpc({'id': 3, 'method': 'thread/start', 'params': {'taskId': 't2', 'readOnly': False, 'conversation': 'c1'}})
     obj._rpc({'id': 4, 'method': 'turn/start', 'params': {'threadId': 'main-thread', 'input': [{'type': 'text', 'text': 'cast it'}]}})
-    assert server.calls[-1] == ('turn/steer', {'threadId': 'main-thread', 'expectedTurnId': 'turn-new',
-                                               'input': [{'type': 'text', 'text': 'cast it'}]})
+    method, params = server.calls[-1]
+    assert method == 'turn/steer' and params.pop('clientUserMessageId').startswith('steer-')
+    assert params == {'threadId': 'main-thread', 'expectedTurnId': 'turn-new', 'input': [{'type': 'text', 'text': 'cast it'}]}
     assert written[-1]['result'] == {'turn': {'id': 'turn-new'}, 'joined': True}
+    assert not executor.control.pending(), 'nothing left waiting'
     assert obj.shared_tasks('main-thread') == ['t1', 't2']
 
 
 # covers: agent.phone-mode/E7
 def test_a_turn_begun_meanwhile_is_joined():
-    executor, server = Executor(), Server(fail_start=True)
+    executor, server = Executor(), Server()
     obj, written = shared_bridge(executor, server)
     obj._rpc({'id': 1, 'method': 'thread/start', 'params': {'taskId': 't1', 'readOnly': False, 'conversation': 'c1'}})
     executor.running = 'ptt-turn'     # push-to-talk began one between
@@ -344,3 +365,45 @@ def test_a_new_job_while_work_runs_goes_on_at_the_same_time(monkeypatch):
     assert obj.owns('side-music') and 'shared' not in written[-1]['result'], 'its own card and lease'
     obj.notification('turn/completed', {'threadId': 'side-music', 'turn': {'id': 't', 'status': 'completed'}})
     assert released == [2], 'its workspace is free again'
+
+
+# covers: agent.task-control/E2
+def test_a_call_s_correction_that_meets_the_end_of_the_turn_goes_on_in_a_new_turn(monkeypatch):
+    # 2026-10-05: steer_task met the end of the turn and was refused; now the words go on in a new
+    # turn on the task's thread, and the coordinator follows that turn.
+    monkeypatch.setattr(task_control, 'SETTLE_S', 0.2)
+    executor, server = Executor(), Server()
+    obj, written = shared_bridge(executor, server)
+    obj._rpc({'id': 1, 'method': 'turn/steer', 'params': {'threadId': 'main-thread', 'expectedTurnId': 'gone',
+                                                           'input': [{'type': 'text', 'text': 'make it red'}]}})
+    assert server.calls[-1][0] == 'turn/start'
+    assert written[-1]['result'] == {'turn': {'id': 'turn-new'}, 'restarted': True}
+    executor.running = 'turn-new'
+    obj._rpc({'id': 2, 'method': 'turn/steer', 'params': {'threadId': 'main-thread', 'expectedTurnId': 'turn-new',
+                                                           'input': [{'type': 'text', 'text': 'and bigger'}]}})
+    assert server.calls[-1][0] == 'turn/steer'
+    assert written[-1]['result'] == {'turn': {'id': 'turn-new'}, 'restarted': False}
+
+
+# covers: agent.task-control/E4
+def test_after_a_restart_the_conversation_s_thread_stays_push_to_talk_s():
+    # Reconcile resumes the journal's tasks: one on the conversation's own thread is shared again, never
+    # claimed as a thread of the call's own (its notifications would leave push-to-talk's card).
+    executor, server = Executor(), Server()
+    obj, written = shared_bridge(executor, server)
+    obj._rpc({'id': 1, 'method': 'thread/resume', 'params': {'threadId': 'main-thread', 'taskId': 't1',
+                                                             'readOnly': False, 'shared': True}})
+    assert written[-1]['result'] == {'thread': {'id': 'main-thread'}, 'shared': True} and not server.calls
+    assert not obj.owns('main-thread') and obj.shared_tasks('main-thread') == ['t1']
+
+
+# covers: agent.task-control/E4
+def test_a_thread_already_loaded_is_not_resumed_with_other_settings():
+    executor, server = Executor(), Server()
+    obj, written = shared_bridge(executor, server)
+    obj.threads['side'] = {'taskId': 't2', 'conversation': 'c1'}
+    obj.side_home['side'] = obj.side_slots['side'] = 3
+    obj._rpc({'id': 1, 'method': 'thread/resume', 'params': {'threadId': 'side', 'taskId': 't2', 'readOnly': False}})
+    assert written[-1]['result'] == {'thread': {'id': 'side'}} and not server.calls
+    assert obj.work_of('side') == {'kind': 'side', 'task': 't2', 'conversation': 'c1', 'workspace': 3}
+    assert obj.work_of('main-thread') is None

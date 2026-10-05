@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import time
 import tomllib
 
 import task_state
@@ -30,6 +31,8 @@ class PhoneSession:
         self.executor = executor
         self.shared = {}            # the conversation's thread -> the C++ tasks that went to it
         self.side_slots = {}        # a parallel acting task's thread -> the workspace it holds
+        self.side_home = {}         # ... and the workspace its settings put it in, held or not
+        self.claim_touched = {}
         self.lock = threading.RLock()
         self.write_lock = threading.Lock()
         self.pending = {}
@@ -123,8 +126,11 @@ class PhoneSession:
         if not self.owns(thread):
             return False
         self._track(method, params)
+        self._keep_claim(thread)
         if method == 'turn/completed':
             self._release_side(thread)     # its workspace is free again
+        elif method == 'turn/started':
+            self._reclaim_side(thread)     # words for it after its end: it works there again
         self._write({'type': 'notification', 'method': method, 'params': params})
         return True
 
@@ -261,47 +267,67 @@ class PhoneSession:
             return {'thread': {'id': thread}, 'shared': True}
         thread = params.get('threadId')
         with self.lock:
+            if method == 'thread/resume' and params.get('shared'):
+                # The coordinator's journal after a restart (Reconcile): a task on the conversation's
+                # own thread, which push-to-talk resumes and owns; never claimed as a thread of its own.
+                self.shared.setdefault(thread, set()).add(task)
             shared = thread in self.shared
         if not shared:
             return None
         if method == 'thread/resume':
             return {'thread': {'id': thread}, 'shared': True}
         if method == 'turn/start':
-            running = self.executor.running_turn(thread)
-            if running:
-                self.server().call('turn/steer', {'threadId': thread, 'expectedTurnId': running, 'input': params['input']})
-                return {'turn': {'id': running}, 'joined': True}
-            try:
-                return self.server().call('turn/start', {**self.executor.turn_params(thread), 'input': params['input']})
-            except Exception:
-                # A turn began meanwhile (push-to-talk, typing, a request just before): join it,
-                # once Codex has said it started.
-                running = None
-                for _ in range(20):
-                    running = self.executor.running_turn(thread)
-                    if running:
-                        break
-                    threading.Event().wait(0.1)
-                if not running:
-                    raise
-                self.server().call('turn/steer', {'threadId': thread, 'expectedTurnId': running, 'input': params['input']})
-                return {'turn': {'id': running}, 'joined': True}
+            # A turn there, or into the one running (push-to-talk's, typing's, another task's), by the
+            # one path every way of talking uses (task_control.py). The coordinator tracks this task
+            # itself: nothing is kept for later when it cannot go now.
+            done = self.executor.control.steer(thread, params['input'], source='call', durable=False)
+            return {'turn': {'id': done.get('turn', '')}, 'joined': done.get('outcome') == 'steered'}
         return None
+
+    def _steer(self, params):
+        """steer_task's words for a running task (any thread): kept until they reach it (task_control.py).
+        Its turn just ended: a new turn on its thread goes on with them -> {'turn': that turn, 'restarted'}.
+        Codex not ready: {'queued': True}, they go as soon as it is."""
+        done = self.executor.control.steer(params['threadId'], params['input'], source='call')
+        if done.get('outcome') == 'queued':
+            return {'queued': True}
+        return {'turn': {'id': done.get('turn', '')}, 'restarted': done.get('outcome') == 'started'}
 
     def _side_thread(self, task, conversation):
         """A thread of its own for parallel acting work, in a free agent workspace -> the
         thread/start result, or None (no workspace free, or none offered)."""
-        try:
-            from rungic_cua import workspace
-            slot = workspace.claim({'pid': os.getpid(), 'thread': task}, exclude=(self.executor.main_workspace(),))
-        except Exception:  # noqa: BLE001 - no workspaces here: the work joins the running turn
-            return None
+        slot, params = self._side_params(task, conversation)
         if slot is None:
             return None
+        result = self.server().call('thread/start', params)
+        thread = (result.get('thread') or {}).get('id')
+        if thread:
+            self._adopt_side(thread, slot, task, conversation)
+        else:
+            self._free(slot)
+        return result
+
+    def _side_params(self, task, conversation, prefer=None):
+        """A free agent workspace for parallel acting work and the thread settings that put it there
+        -> (slot, settings), or (None, None)."""
+        try:
+            from rungic_cua import workspace
+            exclude = {self.executor.main_workspace()}
+            slot = None
+            if prefer is not None and int(prefer) not in exclude:
+                # Its own workspace again (a restart): the windows it worked with are there.
+                slot = workspace.claim({'pid': os.getpid(), 'task': task},
+                                       exclude=exclude | {s for s in workspace.slots() if s != int(prefer)})
+            if slot is None:
+                slot = workspace.claim({'pid': os.getpid(), 'task': task}, exclude=tuple(exclude))
+        except Exception:  # noqa: BLE001 - no workspaces here: the work joins the running turn
+            return None, None
+        if slot is None:
+            return None, None
         env = self.executor.workspace_settings(slot)
         if not env:
-            workspace.release(slot, os.getpid())
-            return None
+            self._free(slot)
+            return None, None
         params = self._task_settings(task, False)
         config = params['config']
         config['shell_environment_policy.set'] = env
@@ -310,25 +336,98 @@ class PhoneSession:
             params['developerInstructions'] = (params.get('developerInstructions') or '') + self.context(conversation) + (
                 f'\n\nThis task runs at the same time as the conversation\'s main work, in workspace {slot}, '
                 'an assistant\'s screen of its own. Work there; do not touch the main work\'s apps.')
-        result = self.server().call('thread/start', params)
-        thread = (result.get('thread') or {}).get('id')
-        if thread:
-            with self.lock:
-                self.threads[thread] = {'taskId': task, 'conversation': conversation}
-                self.side_slots[thread] = slot
-        else:
+        return slot, params
+
+    def _adopt_side(self, thread, slot, task, conversation):
+        with self.lock:
+            self.threads[thread] = {'taskId': task, 'conversation': conversation}
+            self.side_slots[thread] = self.side_home[thread] = slot
+        # Who works in the workspace, for the director's controls (VoiceAgent.screen_work).
+        try:
+            from rungic_cua import workspace
+            workspace.claim_path(slot).write_text(json.dumps({'pid': os.getpid(), 'task': task, 'thread': thread,
+                                                              'since': round(time.time())}))
+        except Exception:  # noqa: BLE001 - the director's controls are without it, the work is not
+            pass
+
+    def _free(self, slot):
+        try:
+            from rungic_cua import workspace
             workspace.release(slot, os.getpid())
-        return result
+        except Exception:  # noqa: BLE001 - a claim of a gone process frees itself
+            pass
+
+    def work_of(self, thread):
+        """The call's work on `thread` (task_control.py): a parallel task in its workspace, a read-only
+        task, or None (not this session's: the conversation's own thread is VoiceAgent's)."""
+        with self.lock:
+            info = self.threads.get(thread)
+            if not info:
+                return None
+            slot = self.side_home.get(thread)
+            return {'kind': 'side' if slot is not None else 'read', 'task': info.get('taskId', ''),
+                    'conversation': info.get('conversation', ''), 'workspace': slot}
+
+    def resume_work(self, record):
+        """Load again, with its own settings, a thread whose work a restart cut (VoiceAgent.resume_work)
+        -> True when it is ready for a turn."""
+        thread, task, conversation = record['thread'], record.get('task', ''), record.get('conversation', '')
+        if record.get('kind') == 'side':
+            slot, params = self._side_params(task, conversation, prefer=record.get('workspace'))
+            if slot is None:
+                return False
+            try:
+                self.server().call('thread/resume', {**params, 'threadId': thread})
+            except Exception:
+                self._free(slot)
+                raise
+            self._adopt_side(thread, slot, task, conversation)
+            return True
+        params = self._task_settings(task, True)
+        if conversation:
+            params['developerInstructions'] = params.get('developerInstructions', '') + self.context(conversation)
+        self.server().call('thread/resume', {**params, 'threadId': thread})
+        with self.lock:
+            self.threads[thread] = {'taskId': task, 'conversation': conversation}
+        return True
+
+    def _keep_claim(self, thread):
+        """A parallel task at work keeps its workspace: a claim untouched for 20 minutes is free again
+        (rungic_cua.workspace), and a long drawing outlived it."""
+        with self.lock:
+            slot = self.side_slots.get(thread)
+            if slot is None or time.monotonic() - self.claim_touched.get(thread, 0) < 60:
+                return
+            self.claim_touched[thread] = time.monotonic()
+        try:
+            from rungic_cua import workspace
+            workspace.touch_claim(slot)
+        except Exception:  # noqa: BLE001 - kept for the next one
+            pass
+
+    def _reclaim_side(self, thread):
+        with self.lock:
+            slot = self.side_home.get(thread)
+            info = self.threads.get(thread) or {}
+            if slot is None or thread in self.side_slots:
+                return
+        try:
+            from rungic_cua import workspace
+            got = workspace.claim({'pid': os.getpid(), 'task': info.get('taskId', ''), 'thread': thread},
+                                  exclude=[s for s in workspace.slots() if s != slot])
+        except Exception:  # noqa: BLE001
+            got = None
+        if got is None:
+            print(f'phone session: workspace {slot} of {thread} is taken; its work goes on there', flush=True)
+            return
+        with self.lock:
+            self.side_slots[thread] = got
 
     def _release_side(self, thread):
         with self.lock:
             slot = self.side_slots.pop(thread, None)
         if slot is not None:
-            try:
-                from rungic_cua import workspace
-                workspace.release(slot, os.getpid())
-            except Exception:  # noqa: BLE001 - a claim of a gone process frees itself
-                pass
+            self._free(slot)
 
     def _rpc(self, message):
         params = dict(message.get('params') or {})
@@ -337,9 +436,19 @@ class PhoneSession:
         conversation = params.pop('conversation', '')
         try:
             shared = self._shared_rpc(method, params, task, read_only, conversation)
+            if shared is None and method == 'turn/steer' and self.executor is not None:
+                shared = self._steer(params)
+            if shared is None and method == 'thread/resume':
+                with self.lock:
+                    known = params.get('threadId') in self.threads
+                if known:
+                    # Already loaded with its own settings (a parallel task's workspace, read-only):
+                    # resuming with the default ones would take them away.
+                    shared = {'thread': {'id': params['threadId']}}
             if shared is not None:
                 self._write({'type': 'rpc-result', 'id': message['id'], 'result': shared})
                 return
+            params.pop('shared', None)
             if method in ('thread/start', 'thread/resume'):
                 params = {**self._task_settings(task, read_only), **params}
                 if conversation:

@@ -147,9 +147,14 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
             const auto tid=t.id;rpc("thread/read",{{"threadId",t.thread},{"includeTurns",true}},[this,tid](QJsonObject o){
                 auto *t=tasks.find(tid);if(!t)return;auto thread=o["result"].toObject()["thread"].toObject();auto turns=thread["turns"].toArray();
                 if(turns.isEmpty()){changed(tid);return;}auto turn=turns.last().toObject();auto status=turn["status"].toString();
-                if(status=="inProgress"){
-                    t->turn=turn["id"].toString();t->status="running";rpc("thread/resume",{{"threadId",t->thread},{"taskId",t->id},{"readOnly",t->readOnly}});lease(*t,true);
-                }else if(status=="completed")t->status="completed";else if(status=="interrupted")t->status="stopped";else t->status="failed";
+                // A turn recorded in progress runs only while Codex has the thread active: after a restart
+                // the record of a cut turn still says inProgress (the service continues recent work with
+                // a new turn, task_control.py, and that one is active).
+                const bool active=thread["status"].toObject()["type"].toString()=="active";
+                if(status=="inProgress"&&active){
+                    t->turn=turn["id"].toString();t->status="running";rpc("thread/resume",{{"threadId",t->thread},{"taskId",t->id},{"readOnly",t->readOnly},{"shared",t->shared},{"conversation",t->conversation}});if(!t->shared)lease(*t,true);
+                }else if(status=="inProgress")t->result="Stopped by a restart of the service";
+                else if(status=="completed")t->status="completed";else if(status=="interrupted")t->status="stopped";else t->status="failed";
                 changed(tid);
             });
         }
@@ -405,9 +410,16 @@ void Session::tool(QString name,QJsonObject args,QString callId,QString response
             }
             else if(t->status=="running"&&!t->turn.isEmpty()){
                 steeredTasks.insert(tid);
+                // The adapter keeps the words until they reach the task (task_control.py): into its turn,
+                // or, the turn just ended, a new turn on its thread that goes on with them.
                 const auto turn=t->turn;rpc("turn/steer",{{"threadId",t->thread},{"expectedTurnId",turn},{"input",QJsonArray{QJsonObject{{"type","text"},{"text",raw}}}}},[this,tid,result,raw](QJsonObject o){
-                    if(o.contains("error")){result({{"error","The task changed before this correction was applied. Check its status and start a follow-up task."}});return;}
-                    if(auto *t=tasks.find(tid)){t->text+='\n'+raw;changed(tid);result(t->json());}
+                    if(o.contains("error")){result({{"error","The correction did not reach the task. Check its status and start a follow-up task."}});return;}
+                    auto *t=tasks.find(tid);if(!t)return;t->text+='\n'+raw;
+                    const auto r=o["result"].toObject();const auto next=r["turn"].toObject()["id"].toString();
+                    if(!next.isEmpty()&&next!=t->turn){t->turn=next;if(!t->cancelRequested)t->status="running";}
+                    changed(tid);auto j=t->json();
+                    if(r["queued"].toBool())j["note"]="Saved. It goes to the task as soon as the task connection is back.";
+                    result(j);
                 });
             } else result({{"error","The task is no longer running. Start a follow-up task with the requested correction."},{"task",t->json()}});
         } else result({{"error","Unknown task tool"}});
@@ -484,6 +496,9 @@ void Session::notification(QString method,QJsonObject p){
 void Session::taskNotification(Task &task,QString method,QJsonObject p){
     auto *t=&task;const auto tid=t->id;
     if(method=="turn/started"){
+        // A new turn on a finished task's own thread is its work going on (words given to it after
+        // its end, or the service continuing it after a restart, task_control.py).
+        if(t->terminal()&&!t->cancelRequested&&!t->shared){t->status="starting";t->backendStopped=false;t->result.clear();if(!t->readOnly)lease(*t,true);}
         t->turn=p["turn"].toObject()["id"].toString();if(t->cancelRequested)t->status="stopping";if(t->status=="starting")t->status="running";if(t->cancelRequested)stopTask(tid);else changed(tid);
     } else if(method=="turn/completed"){
         auto turn=p["turn"].toObject();if(!t->turn.isEmpty()&&turn["id"].toString()!=t->turn)return;

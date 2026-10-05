@@ -538,3 +538,18 @@ msgstr "组长已停止"
 
 msgid "Stopped when the assistant restarted"
 msgstr "助理重启时已停止"
+
+msgid "The task didn't stop. Try again."
+msgstr "任务没有停下，请再试一次。"
+
+msgid "The assistant restarted and stopped the work that was under way. Say “continue” to go on with it."
+msgstr "助理重启了，刚才在做的事停下了。说“继续”就接着做。"
+
+msgid "The assistant restarted while it worked. It goes on with the task."
+msgstr "助理在工作时重启了，现在接着做刚才的任务。"
+
+msgid "Say what the assistant should do"
+msgstr "说说要助理做什么"
+
+msgid "No task works on this screen"
+msgstr "这块屏上没有任务在做"

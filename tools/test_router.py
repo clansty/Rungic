@@ -19,7 +19,8 @@ def workspace_up(tmp_path):
     with mock.patch.object(router.workspace, 'ensure', return_value=True), \
             mock.patch.object(router.team, 'Murmur', mock.MagicMock()), \
             mock.patch.object(router.team, 'board_path', lambda: tmp_path / 'team-board.json'), \
-            mock.patch.object(router.team, '_send', lambda request: None):
+            mock.patch.object(router.team, '_send', lambda request: None), \
+            mock.patch.object(router.hold, 'DIR', tmp_path):
         yield
 
 

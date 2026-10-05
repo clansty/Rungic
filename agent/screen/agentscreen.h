@@ -18,6 +18,7 @@
 #include <QRect>
 #include <QTimer>
 #include <QVariantMap>
+#include <functional>
 #include <memory>
 
 
@@ -45,6 +46,15 @@ class AgentScreen : public QObject
     // post (review, progress, blocked, question, done, failed, ended), "" outside a team.
     Q_PROPERTY(QString teamRole READ teamRole NOTIFY activityChanged)
     Q_PROPERTY(QString teamKind READ teamKind NOTIFY activityChanged)
+    // The work on this screen and the user's control of it (docs/114; the voice agent's ScreenWork):
+    // `workKind` main (the conversation's own work), side (a call's parallel task), member (a team
+    // member: its words and stop go through its lead) or "" (none); `workBusy` it is at work now;
+    // `held` the user has taken the screen over (rungic_cua.hold: the agent's tools wait), `heldHere`
+    // by this window (it gives it back when it closes).
+    Q_PROPERTY(QString workKind READ workKind NOTIFY workChanged)
+    Q_PROPERTY(bool workBusy READ workBusy NOTIFY workChanged)
+    Q_PROPERTY(bool held READ held NOTIFY workChanged)
+    Q_PROPERTY(bool heldHere READ heldHere NOTIFY workChanged)
 
 public:
     // `workspace`: 0 desktop mode, n the assistant's screen of workspace n.
@@ -62,6 +72,10 @@ public:
     QString activityText() const { return m_activityText; }
     QString teamRole() const { return m_teamRole; }
     QString teamKind() const { return m_teamKind; }
+    QString workKind() const { return m_workKind; }
+    bool workBusy() const { return m_workBusy; }
+    bool held() const { return m_held; }
+    bool heldHere() const { return m_heldHere; }
 
     // Input at a fraction (0..1) of the assistant's screen.
     Q_INVOKABLE void pointerMove(double fx, double fy);
@@ -90,6 +104,13 @@ public:
     Q_INVOKABLE void key(int code, bool pressed);
     // Turn the screen off and quit.
     Q_INVOKABLE void close();
+    // The director's controls (docs/114): words for the work on this screen (kept until they reach
+    // it), stop it (done when the agent says the turn ended), take the screen over and give it back
+    // (with words, optional). Each answers with controlDone.
+    Q_INVOKABLE void tell(const QString &text);
+    Q_INVOKABLE void stopWork();
+    Q_INVOKABLE void takeOver();
+    Q_INVOKABLE void giveBack(const QString &note = QString());
 
 Q_SIGNALS:
     void statusChanged();
@@ -98,8 +119,15 @@ Q_SIGNALS:
     void tvNodeIdChanged();
     void promptingChanged();
     void activityChanged();
+    void workChanged();
+    // What: "tell", "stop", "hold", "back"; ok: it was done (a stop: the agent stopped); detail: the
+    // voice agent's answer ("queued": the words wait for the task).
+    void controlDone(const QString &what, bool ok, const QString &detail);
 
 private:
+    void readHold();
+    void queryWork();
+    void callAgent(const QString &method, const QVariantList &args, std::function<void(bool, const QJsonObject &)> done);
     void poll();
     void update();
     void setStatus(const QString &status);
@@ -128,6 +156,14 @@ private:
     QString m_teamRole;
     QString m_teamKind;
     double m_activityTime = 0;
+    QString m_holdPath;
+    QString m_workKind;
+    bool m_workBusy = false;
+    bool m_held = false;
+    bool m_heldHere = false;
+    bool m_holdAsked = false;
+    bool m_querying = false;
+    QTimer m_holdRefresh;
     // The assistant's screen shows workspace n (docs/research/91): its picture comes from
     // rungic-workspace-stream, which records that workspace's KWin. 0: desktop mode.
     int m_workspace = 0;

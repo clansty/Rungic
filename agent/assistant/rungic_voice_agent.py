@@ -48,6 +48,7 @@ sys.path.insert(0, '/usr/lib/rungic-voice-agent')
 sys.path.insert(1, '/usr/lib/rungic-cua')
 import shutil
 import socket
+import task_control
 import task_state
 import team_feed
 import model_catalog
@@ -99,6 +100,11 @@ DEVICE_CODE_S = 15 * 60
 # everything the agent opens appears and nothing reaches the user's phone. A second agent
 # would get 2, and so on (the host offers ws-1 .. ws-4).
 WORKSPACE = 1
+# The first words of a turn that continues work a restart cut (docs/114).
+RESUME_TEXT = ('The assistant service restarted and stopped your work on this task. Sub-agents that you started '
+               'stopped too. Look at the current state of the screen and the files. Then continue the task from '
+               'where it stopped. Do not do again the steps that are complete. Start sub-agents again only for '
+               'parts that are not complete.')
 # Spoken progress while the agent works: Codex hands agent updates to the voice
 # model as context only (no response), so it would stay silent until the end.
 # Spoken progress (docs/89): by events, not by the clock. The screen shows every step; the
@@ -178,6 +184,10 @@ INTERFACE = '''
     <method name="StopSuggestion"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
     <method name="Curate"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
     <method name="OpenBriefingCard"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="ScreenWork"><arg type="i" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="SteerScreen"><arg type="i" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="StopScreen"><arg type="i" direction="in"/><arg type="s" direction="out"/></method>
+    <method name="HoldScreen"><arg type="i" direction="in"/><arg type="b" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
     <signal name="Event"><arg type="s"/></signal>
   </interface>
 </node>
@@ -861,6 +871,11 @@ class VoiceAgent:
         self.desktop_jobs = {}
         self.desktop_generation = 0
         self.server = None
+        # The work in flight and the user's control of it (docs/114): words for a task kept until they
+        # reach it, stop with a check, work a restart cut continued. One owner for push-to-talk, calls
+        # and the director.
+        self.control = task_control.TaskControl(lambda: self.server, DATA / 'task-control.json',
+                                                describe=self.work_kind, params=self.turn_params, log=log)
         # The workspace comes up with the service, ready before the first task needs it.
         threading.Thread(target=workspace_env, kwargs={'wait': 20}, daemon=True).start()
         try:
@@ -871,15 +886,19 @@ class VoiceAgent:
         GLib.timeout_add_seconds(30, self.idle_check)
         # A team led from a conversation (docs/research/91 §14): its board there, its milestones heard.
         self.team = team_feed.Feed()
-        # No turn outlives a restart (docs/101 E12): a team still at work on its board was cut
-        # off with its lead; it ends, so the director does not keep its members.
+        # Work a restart cut (docs/114): recent work goes on by itself, older work is said. A team still
+        # at work on its board was cut with its lead: it ends, unless its lead goes on (it starts its
+        # members again).
+        cut = self.control.take_cut()
         try:
             from rungic_cua import team
             board = json.loads(team.board_path().read_text())
-            if board.get('lead') and board.get('phase') not in ('done', 'failed'):
+            going_on = any(c.get('recent') and c.get('thread') == board.get('lead') for c in cut)
+            if board.get('lead') and board.get('phase') not in ('done', 'failed') and not going_on:
                 team.end(board['lead'], 'failed', _('Stopped when the assistant restarted'))
         except Exception:  # noqa: BLE001 - no board, or none to end
             pass
+        threading.Thread(target=self.resume_work, args=(cut,), daemon=True).start()
         self.team_notes = {}
         self.team_note_signal = 0
         GLib.timeout_add_seconds(2, self.team_tick)
@@ -1873,6 +1892,133 @@ class VoiceAgent:
         """What puts a parallel task's programs and desktop tools in workspace `slot`, or None."""
         return workspace_env(slot)
 
+    # ---- the work in flight and the user's control of it (task_control.py, docs/114) -----------
+    def work_kind(self, thread):
+        """What work runs on `thread`, for TaskControl: the open conversation's own, a call's task, or
+        None (curation and other threads of our own)."""
+        if thread in getattr(self, 'background', {}):
+            return None
+        if thread and thread == self.thread_id:
+            return {'kind': 'main', 'conversation': thread, 'workspace': WORKSPACE}
+        phone = getattr(self, 'phone', None)
+        return phone.work_of(thread) if phone else None
+
+    def resume_work(self, cut):
+        """Work the last end of the service cut (TaskControl.take_cut): recent work goes on with a new
+        turn that says what happened; older work is only said in its conversation."""
+        for record in cut:
+            conversation, kind, thread = record.get('conversation') or '', record.get('kind'), record['thread']
+            if not conversation:
+                continue
+            if not record.get('recent') or not self.server:
+                self.emit({'type': 'message', 'role': 'assistant', 'id': f'cut-{time.time_ns()}', 'conversation': conversation,
+                           'text': _('The assistant restarted and stopped the work that was under way. Say “continue” '
+                                     'to go on with it.')})
+                continue
+            try:
+                if kind == 'main':
+                    if self.main_thread(conversation) != thread:
+                        continue
+                elif kind in ('side', 'read'):
+                    if not self.phone_session().resume_work(record):
+                        raise RuntimeError('no workspace free')
+                else:
+                    continue
+                done = self.control.steer(thread, [{'type': 'text', 'text': RESUME_TEXT, 'text_elements': []}],
+                                          source='restart')
+                log('resume', kind, thread, done)
+                self.emit({'type': 'message', 'role': 'assistant', 'id': f'resumed-{time.time_ns()}',
+                           'conversation': conversation,
+                           'text': _('The assistant restarted while it worked. It goes on with the task.')})
+            except Exception as error:  # noqa: BLE001 - said, never the end of the service
+                log('resume', thread, error)
+                self.emit({'type': 'message', 'role': 'assistant', 'id': f'cut-{time.time_ns()}', 'conversation': conversation,
+                           'text': _('The assistant restarted and stopped the work that was under way. Say “continue” '
+                                     'to go on with it.')})
+        # Words saved for a task before the restart go now.
+        self.control.flush()
+
+    def screen_work(self, slot):
+        """Who works on screen `slot` (an agent workspace; 0 the user's desktop), for the director's
+        controls -> {'workspace', 'kind': 'main' | 'side' | 'member' | '', 'thread', 'busy', 'held', 'role'}.
+        A team member's words and stop go to its lead (the lead owns the brief and its members)."""
+        from rungic_cua import hold, workspace
+        slot = int(slot)
+        work = {'workspace': slot, 'kind': '', 'thread': '', 'busy': False, 'held': bool(hold.holder(slot)), 'role': ''}
+        if slot in (0, WORKSPACE):
+            if self.thread_id:
+                work.update(kind='main', thread=self.thread_id)
+        else:
+            holder = workspace.claim_holder(slot) or {}
+            if holder.get('parent'):
+                work.update(kind='member', thread=holder['parent'], member=holder.get('thread') or '')
+                try:
+                    from rungic_cua import team
+                    work['role'] = json.loads(team.state_path(slot).read_text()).get('role', '')
+                except Exception:  # noqa: BLE001 - no role known
+                    pass
+            elif holder.get('thread'):
+                work.update(kind='side', thread=holder['thread'])
+        if work['thread']:
+            work['busy'] = bool(self.control.running(work['thread']) or
+                                (work['kind'] == 'main' and self.agent_busy))
+        return work
+
+    def steer_screen(self, slot, text):
+        """The director's "Tell": the user's words for the work on screen `slot`, kept until they reach it."""
+        text = text.strip()
+        work = self.screen_work(slot)
+        if not text:
+            raise ValueError(_('Say what the assistant should do'))
+        if not work['thread']:
+            raise RuntimeError(_('No task works on this screen'))
+        if work['kind'] == 'member':
+            words = (f'The user watches workspace {slot} (team member {work["role"] or work.get("member")}) in the '
+                     f'director and says to that member: {text}\nGive it to that member (send_input). If it changes '
+                     'the plan, change the brief too.')
+        else:
+            words = f'The user watches your screen (workspace {slot}) in the director and says: {text}'
+        conversation = work['thread'] if work['kind'] in ('main', 'member') else ((self.phone.work_of(work['thread']) or {}).get('conversation') if self.phone else '')
+        if conversation:
+            self.emit({'type': 'message', 'role': 'user', 'id': f'director-{time.time_ns()}', 'conversation': conversation,
+                       'text': text, 'typed': True})
+        if work['kind'] == 'main' and self.agent_busy and self.turn_id:
+            self.control.started(work['thread'], self.turn_id)
+        return self.control.steer(work['thread'], [{'type': 'text', 'text': words, 'text_elements': []}], source='director')
+
+    def stop_screen(self, slot):
+        """The director's "Stop": the work on screen `slot` stops, with a check (task_control.stop)."""
+        work = self.screen_work(slot)
+        if not work['thread']:
+            return {'stopped': True, 'turn': ''}
+        if work['kind'] == 'member':
+            # A member stops through its lead: the lead closes it and decides what becomes of its part.
+            self.control.steer(work['thread'], [{'type': 'text', 'text_elements': [], 'text':
+                               f'The user stops team member {work["role"] or work.get("member")} (workspace {slot}) in the '
+                               'director. Close that member now (close_agent) and tell the user what becomes of its part.'}],
+                               source='director')
+            return {'stopped': False, 'asked': True}
+        if work['kind'] == 'main':
+            if self.agent_busy and self.turn_id:
+                self.control.started(work['thread'], self.turn_id)
+            self.cancel_desktop_steps()
+            return self.stop_verified(work['thread'])
+        return self.control.stop(work['thread'])
+
+    def hold_screen(self, slot, on, note=''):
+        """The director's "Take over" / "Give back": the agent's desktop tools wait while the user holds
+        screen `slot` (rungic_cua.hold). What the user says on giving it back goes to the work as words."""
+        from rungic_cua import hold
+        slot = int(slot)
+        if on:
+            record = hold.take(slot)
+            return {'held': True, 'since': record['since']}
+        record = hold.give_back(slot)
+        done = {}
+        if note.strip():
+            done = self.steer_screen(slot, note)
+        return {'held': bool(hold.holder(slot)), 'handed': record, 'note': done}
+
     def call_here(self):
         """A call with the Agent is open in this conversation: its voice is the one to speak."""
         phone = getattr(self, 'phone', None)
@@ -2014,6 +2160,7 @@ class VoiceAgent:
         GLib.idle_add(send)
 
     def on_notification(self, method, params):
+        self.control.on_notification(method, params)
         phone_owned = self.phone and self.phone.notification(method, params)
         if method == 'turn/started':
             self.usage_accounts[(params.get('threadId'), (params.get('turn') or {}).get('id'))] = self.usage_identity()
@@ -2595,13 +2742,17 @@ class VoiceAgent:
         if not (self.agent_busy and self.thread_id and self.turn_id):
             return
         log('stop task', self.turn_id)
-        try:
-            self.server.call('turn/interrupt', {'threadId': self.thread_id, 'turnId': self.turn_id}, timeout=10)
-        except Exception as error:
-            log('turn/interrupt', error)
-            self.emit({'type': 'error', 'text': _("Couldn't stop: {error}").format(error=error)})
-            return
-        self.emit({'type': 'task-stopped'})
+        self.control.started(self.thread_id, self.turn_id)
+        threading.Thread(target=self.stop_verified, args=(self.thread_id,), daemon=True).start()
+
+    def stop_verified(self, thread):
+        """Stop is done when Codex says the turn ended (task_control.stop), not when it was asked."""
+        done = self.control.stop(thread)
+        if done['stopped']:
+            self.emit({'type': 'task-stopped', 'conversation': thread})
+        else:
+            self.emit({'type': 'error', 'conversation': thread, 'text': _("The task didn't stop. Try again.")})
+        return done
 
     def approve(self, approval, decision):
         request_id = self.approvals.pop(approval, None)
@@ -3349,6 +3500,14 @@ class Service:
                     result = json.dumps(agent.start_call(json.loads(args[0])), ensure_ascii=False)
                 elif method == 'CallCommand':
                     agent.call_command(args[0])
+                elif method == 'ScreenWork':
+                    result = json.dumps(agent.screen_work(args[0]), ensure_ascii=False)
+                elif method == 'SteerScreen':
+                    result = json.dumps(agent.steer_screen(args[0], args[1]), ensure_ascii=False)
+                elif method == 'StopScreen':
+                    result = json.dumps(agent.stop_screen(args[0]), ensure_ascii=False)
+                elif method == 'HoldScreen':
+                    result = json.dumps(agent.hold_screen(args[0], args[1], args[2]), ensure_ascii=False)
                 elif method == 'SendText':
                     agent.send_text(args[0], json.loads(args[1] or '[]'))
                 elif method == 'InvestigateSuggestion':

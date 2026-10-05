@@ -260,5 +260,36 @@ int main(int argc,char **argv){
         check(v.playback.pending.size()==ReplyBuffer::MaxPendingBytes,"cutting the reply keeps its buffered audio");
         for(const auto &o:events)if(o["type"]=="event")check(o["event"].toObject()["type"]!="phone-notice","no notice ends or interrupts the conversation");
     }
+    {
+        // covers: agent.task-control/E2 agent.task-control/E4
+        // A correction that meets the end of its turn goes on in a new turn on the task's thread (the
+        // adapter keeps it, task_control.py): the task follows that turn (2026-10-05: it was refused).
+        Session w;QList<QJsonObject> out;w.output=[&](QJsonObject o){out.append(o);};
+        w.conversation="steer";w.id="voice-steer";w.configured=true;w.generation=1;
+        auto t=w.tasks.add("draw the hills",false,"steer","hills");auto *task=w.tasks.find(t);
+        task->status="running";task->thread="hills-thread";task->turn="turn-a";task->shared=false;
+        w.responses["more"]={"make the sky red","u-more",1,false};
+        w.tool("steer_task",{{"task_id",t}},"steer-more","more");
+        int rid=-1;for(const auto &o:out)if(o["type"]=="rpc"&&o["method"]=="turn/steer")rid=o["id"].toInt();
+        check(rid>0,"the correction goes to the adapter");
+        w.receive({{"type","rpc-result"},{"id",rid},{"result",QJsonObject{{"turn",QJsonObject{{"id","turn-b"}}},{"restarted",true}}}});
+        check(w.tasks.find(t)->turn=="turn-b"&&w.tasks.find(t)->status=="running","the task follows the turn its words started");
+        w.notification("turn/completed",{{"threadId","hills-thread"},{"turn",QJsonObject{{"id","turn-a"},{"status","completed"}}}});
+        check(w.tasks.find(t)->status=="running","the old turn's end does not end the task");
+        w.notification("turn/completed",{{"threadId","hills-thread"},{"turn",QJsonObject{{"id","turn-b"},{"status","completed"}}}});
+        check(w.tasks.find(t)->status=="completed","its new turn's end does");
+        // A new turn on a finished task's own thread (words after its end, the service continuing it
+        // after a restart) is its work going on.
+        w.notification("turn/started",{{"threadId","hills-thread"},{"turn",QJsonObject{{"id","turn-c"}}}});
+        check(w.tasks.find(t)->status=="running"&&w.tasks.find(t)->turn=="turn-c","a finished task's thread at work again is the task at work");
+        // After a restart a cut turn's record still says inProgress: running only if the thread is active.
+        auto cut=w.tasks.add("cut",false,"steer","cut");w.tasks.find(cut)->status="interrupted";w.tasks.find(cut)->thread="cut-thread";
+        out.clear();w.command("Reconcile",{},[](QJsonObject){});
+        int read=-1;for(const auto &o:out)if(o["type"]=="rpc"&&o["method"]=="thread/read"&&o["params"].toObject()["threadId"]=="cut-thread")read=o["id"].toInt();
+        check(read>0,"reconcile reads the cut task's thread");
+        w.receive({{"type","rpc-result"},{"id",read},{"result",QJsonObject{{"thread",QJsonObject{{"status",QJsonObject{{"type","notLoaded"}}},
+            {"turns",QJsonArray{QJsonObject{{"id","dead"},{"status","inProgress"}}}}}}}}});
+        check(w.tasks.find(cut)->status=="interrupted","a dead turn is not shown as running");
+    }
     std::puts("session state, transcript fidelity, late events, cancellation and hangup checks passed");
 }

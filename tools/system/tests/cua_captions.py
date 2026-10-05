@@ -28,10 +28,10 @@ CMAKE = f'''cmake_minimum_required(VERSION 3.22)
 project(CaptionProbe LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_AUTOMOC ON)
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Network)
+find_package(Qt6 REQUIRED COMPONENTS Core DBus Gui Network)
 qt_add_executable(caption-probe probe.cpp {SRC}/agentscreen.cpp {SRC}/agentscreen.h)
 target_include_directories(caption-probe PRIVATE {SRC})
-target_link_libraries(caption-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network)
+target_link_libraries(caption-probe PRIVATE Qt6::Core Qt6::DBus Qt6::Gui Qt6::Network)
 '''
 PROBE = r'''#include "agentscreen.h"
 #include <QGuiApplication>

@@ -67,18 +67,22 @@ class Screen(QObject):
     tvNodeIdChanged = Signal()
     promptingChanged = Signal()
     activityChanged = Signal()
+    workChanged = Signal()
+    controlDone = Signal(str, bool, str)
 
     def __init__(self, workspace=0, node=40):
         super().__init__()
         self.calls = []
         self._workspace = workspace
         self.values = {'status': 'running', 'nodeId': node, 'pointerNodeId': 0, 'tvNodeId': 0, 'onTv': False,
-                       'prompting': False, 'activityState': '', 'activityText': '', 'teamRole': '', 'teamKind': ''}
+                       'prompting': False, 'activityState': '', 'activityText': '', 'teamRole': '', 'teamKind': '',
+                       'workKind': '', 'workBusy': False, 'held': False, 'heldHere': False}
 
     def set(self, **values):
         signals = {'status': self.statusChanged, 'onTv': self.statusChanged, 'nodeId': self.nodeIdChanged,
                    'pointerNodeId': self.pointerNodeIdChanged, 'tvNodeId': self.tvNodeIdChanged,
-                   'prompting': self.promptingChanged}
+                   'prompting': self.promptingChanged, 'workKind': self.workChanged, 'workBusy': self.workChanged,
+                   'held': self.workChanged, 'heldHere': self.workChanged}
         self.values.update(values)
         for name in values:
             signals.get(name, self.activityChanged).emit()
@@ -97,6 +101,28 @@ class Screen(QObject):
     activityText = Property(str, lambda s: s.values['activityText'], notify=activityChanged)
     teamRole = Property(str, lambda s: s.values['teamRole'], notify=activityChanged)
     teamKind = Property(str, lambda s: s.values['teamKind'], notify=activityChanged)
+    workKind = Property(str, lambda s: s.values['workKind'], notify=workChanged)
+    workBusy = Property(bool, lambda s: s.values['workBusy'], notify=workChanged)
+    held = Property(bool, lambda s: s.values['held'], notify=workChanged)
+    heldHere = Property(bool, lambda s: s.values['heldHere'], notify=workChanged)
+
+    @Slot(str)
+    def tell(self, text):
+        self.calls.append(('tell', text))
+
+    @Slot()
+    def stopWork(self):
+        self.calls.append(('stopWork',))
+
+    @Slot()
+    def takeOver(self):
+        self.calls.append(('takeOver',))
+        self.set(held=True, heldHere=True)
+
+    @Slot(str)
+    def giveBack(self, note):
+        self.calls.append(('giveBack', note))
+        self.set(held=False, heldHere=False)
 
     @Slot(float, float)
     def pointerMove(self, fx, fy):
@@ -796,6 +822,60 @@ class Keyboard(WindowTest):
         self.leave_fullscreen()
         self.assertFalse(win.property('typing'))
         self.assertIsNone(win.property('keyboard'), 'out of fullscreen, no keyboard')
+
+
+class Controls(WindowTest):
+    """The director's controls of the work on a screen (docs/114)."""
+
+    # covers: agent.task-control/E5
+    def test_no_controls_without_work_on_the_screen(self):
+        self.open(workspace=1)
+        self.enter_fullscreen()
+        self.assertNotIn('document-edit', self.icons())
+        self.screen.set(workKind='main', workBusy=True)
+        QTest.qWait(50)
+        icons = self.icons()
+        self.assertIn('document-edit', icons, 'Tell')
+        self.assertIn('transform-browse', icons, 'Take over')
+        self.assertIn('media-playback-stop', icons, 'Stop, while it works')
+        self.screen.set(workBusy=False)
+        QTest.qWait(50)
+        self.assertNotIn('media-playback-stop', self.icons(), 'nothing to stop')
+
+    # covers: agent.task-control/E5
+    def test_tell_types_the_words_in_a_bar_and_sends_them_to_the_screen_s_work(self):
+        win = self.open(workspace=2)
+        self.screen.set(workKind='side', workBusy=True)
+        self.enter_fullscreen()
+        win.setProperty('toolbarShown', True)
+        QTest.qWait(250)
+        self.tap_action('document-edit')
+        self.wait(lambda: win.property('telling') and win.property('keyboard') is not None, 'the bar and the keyboard')
+        field = self.find(lambda i: i.objectName() == '' and i.property('preeditText') is not None
+                          and i.property('clip') is True)[0]
+        self.assertTrue(field.hasActiveFocus(), 'the words go into the bar, not into the screen')
+        field.setProperty('text', '把天空改成红色')
+        QMetaObject.invokeMethod(win, 'sendTell')
+        self.assertEqual(self.screen.of('tell'), [['把天空改成红色']])
+        self.assertFalse(self.screen.of('typeText'), 'nothing typed into the screen')
+        self.assertFalse(win.property('telling'))
+        self.screen.controlDone.emit('tell', True, 'queued')
+        QTest.qWait(30)
+        self.assertEqual(win.property('notice'), 'Noted. The assistant gets it as soon as it can.')
+
+    # covers: agent.task-control/E1
+    def test_take_over_shows_who_has_the_screen_and_leaving_gives_it_back(self):
+        win = self.open(workspace=2)
+        self.screen.set(workKind='side', workBusy=True)
+        self.enter_fullscreen()
+        win.setProperty('toolbarShown', True)
+        QTest.qWait(250)
+        self.tap_action('transform-browse')
+        self.assertEqual(self.screen.of('takeOver'), [[]])
+        QTest.qWait(50)
+        self.assertTrue(self.label('You have the screen · the assistant waits'), 'the chip says the assistant waits')
+        self.leave_fullscreen()
+        self.assertEqual(self.screen.of('giveBack'), [['']], 'leaving fullscreen gives the screen back')
 
 
 class Tv(WindowTest):
