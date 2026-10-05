@@ -73,7 +73,8 @@ QJsonObject Session::fields() const{
             {"speaking",!playback.pending.isEmpty()||responseActive},{"listening",localSpeech},{"thinking",thinking()},
             {"startedAt",double(started)},{"focusedTask",tasks.focused},{"tasks",tasks.snapshot()}};
 }
-void Session::state(){auto o=fields();o["type"]="phone-state";event(o,false);}
+// A call's state is the app's (its call bar); push-to-talk's is the adapter's only.
+void Session::state(){auto o=fields();o["type"]=press()?"voice-state":"phone-state";o["mode"]=mode;event(o,false);}
 void Session::receive(QJsonObject o){
     const auto type=o["type"].toString();
     if(type=="rpc-result") {auto f=callbacks.take(o["id"].toInt());if(f)f(o);}
@@ -88,7 +89,14 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
         done({{"ok",true}});
     } else if(method=="StartPhoneMode"){
         QString target=args["conversationId"].toString();if(target.isEmpty()){done({{"error","A conversation is required"}});return;}
+        const QString wanted=args["mode"].toString()=="press"?"press":"call";
+        if(!id.isEmpty()&&press()){
+            // Push-to-talk's session gives way: to another conversation's, or to a call.
+            if(wanted=="press"&&target==conversation){done({{"sessionId",id}});return;}
+            stop();
+        }
         if(!id.isEmpty()){if(target==conversation){done({{"sessionId",id}});return;}done({{"error","Another conversation owns the phone session"}});return;}
+        mode=wanted;
         prompt=args["instructions"].toString();
         if(prompt.isEmpty()){done({{"error","Phone mode instructions unavailable"}});return;}
         start(target,args["language"].toString());done(id.isEmpty()?QJsonObject{{"error","Voice could not start"}}:QJsonObject{{"sessionId",id}});
@@ -124,8 +132,14 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
     else if(method=="Narrate"){
         // Not over the voice's own words: an update waits for 12 s of quiet after it spoke (the
         // updates came every few seconds over its acknowledgements, 2026-10-05).
-        const bool quiet=!responseActive&&playback.pending.isEmpty()&&clock.elapsed()-lastPlaybackPush>12000;
-        if(configured&&!id.isEmpty()&&!localSpeech&&!narrationSuppressed&&quiet)requestReply({args["text"].toString(),{},generation,true},"Say one short sentence to the user, as the message asks. Do not start, steer or stop any task.");
+        // Push-to-talk paces its updates itself (VoiceAgent.progress_tick) and asks for no wait.
+        const qint64 wait=args.contains("quiet")?qint64(args["quiet"].toDouble()):12000;
+        const bool quiet=!responseActive&&playback.pending.isEmpty()&&clock.elapsed()-lastPlaybackPush>wait;
+        if(args["exact"].toBool()&&configured&&!id.isEmpty()){
+            // "朗读": the text read as it is; heard, never shown as a new message.
+            ResponseContext c{args["text"].toString(),{},generation,true};c.aloud=true;narrationSuppressed=false;
+            requestReply(c,"Read the text under \"Verified updates\" to the user exactly as written, in its own language, adding or leaving out nothing, without comment.");
+        } else if(configured&&!id.isEmpty()&&!localSpeech&&!narrationSuppressed&&quiet)requestReply({args["text"].toString(),{},generation,true},"Say what the message asks, in one or two short sentences. Do not start, steer or stop any task.");
         done({{"ok",true}});
     }
     else if(method=="ExternalBusy"){externalBusy=args["busy"].toBool();if(!externalBusy)runQueue();done({{"ok",true}});}
@@ -159,7 +173,29 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
             });
         }
         done({{"ok",true}});
-    } else done({{"error","Unknown phone command"}});
+    } else if(method.startsWith("Press"))pressCommand(method,args,done);
+    else done({{"error","Unknown phone command"}});
+}
+// Push-to-talk (docs/115): the adapter's press is the utterance. Audio streams while the button is
+// held; the release commits it, and its transcript is what the voice acts on (as a call's).
+void Session::pressCommand(const QString &method,const QJsonObject &args,std::function<void(QJsonObject)> done){
+    if(!press()||id.isEmpty()){done({{"error","No push-to-talk session"}});return;}
+    if(method=="PressStart"){
+        narrationSuppressed=false;pressHeardMs=args.contains("playedMs")?qint64(args["playedMs"].toDouble()):-1;
+        stopSpeaking();pressHeardMs=-1;
+        ++generation;utterance="press-"+QString::number(qint64(args["press"].toDouble()));inputItems.clear();transcripts.clear();
+        submitted=false;commitPending=false;localSpeech=true;lastVoice=lastUser=clock.elapsed();
+        send({{"type","input_audio_buffer.clear"}});state();done({{"ok",true},{"utterance",utterance}});
+    } else if(method=="PressAudio"){
+        if(configured&&localSpeech&&!muted)send({{"type","input_audio_buffer.append"},{"audio",args["pcm"].toString()}});
+        done({{"ok",true}});
+    } else if(method=="PressCommit"){
+        if(localSpeech){localSpeech=false;lastVoice=clock.elapsed();commitPending=true;send({{"type","input_audio_buffer.commit"}});}
+        state();done({{"ok",true}});
+    } else if(method=="PressCancel"){
+        localSpeech=false;submitted=true;utterance.clear();inputItems.clear();transcripts.clear();commitPending=false;
+        send({{"type","input_audio_buffer.clear"}});state();done({{"ok",true}});
+    } else done({{"error","Unknown push-to-talk command"}});
 }
 void Session::start(QString target,QString lang){
     QFile keyFile(QDir::homePath()+"/.config/rungic-voice-agent/openai-api-key");
@@ -172,19 +208,19 @@ void Session::start(QString target,QString lang){
     if(!proxy.isEmpty()){QUrl u(proxy);auto type=u.scheme().startsWith("socks")?QNetworkProxy::Socks5Proxy:QNetworkProxy::HttpProxy;ws.setProxy(QNetworkProxy(type,u.host(),u.port(type==QNetworkProxy::Socks5Proxy?1080:8080),u.userName(),u.password()));}
     else ws.setProxy(QNetworkProxy::NoProxy);
     QNetworkRequest req(QUrl("wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini"));req.setRawHeader("Authorization","Bearer "+key);key.fill(0);
-    started=QDateTime::currentSecsSinceEpoch();ws.open(req);audio.start(id);lastUser=clock.elapsed();state();
-    const auto current=id;QTimer::singleShot(25000,this,[this,current]{if(id==current&&(!configured||!audio.opened))stop("Voice connection timed out; tap to retry");});
+    started=QDateTime::currentSecsSinceEpoch();ws.open(req);if(!press())audio.start(id);lastUser=clock.elapsed();pressSent=0;aloud.clear();state();
+    const auto current=id;QTimer::singleShot(25000,this,[this,current]{if(id==current&&(!configured||(!press()&&!audio.opened)))stop("Voice connection timed out; tap to retry");});
 }
 void Session::stop(QString reason){
     const auto old=id;if(old.isEmpty())return;
     // The call's summary, kept in its conversation: how long it was and what was started in it
     // (the tasks of this conversation created since it began), as the app shows it after the call.
-    if(started>0){
+    if(started>0&&!press()){
         QJsonArray work;for(const auto &t:tasks.rows)if(t.conversation==conversation&&t.created>=started)work.append(QJsonObject{{"taskId",t.id},{"text",t.text},{"status",t.status}});
         event({{"type","phone-ended"},{"sessionId",old},{"startedAt",double(started)},{"seconds",double(std::max<qint64>(0,QDateTime::currentSecsSinceEpoch()-started))},{"tasks",work},{"reason",reason}});
     }
     started=0;id.clear();configured=connected=false;phase="closed";playback.clear();localSpeech=serverSpeech=false;submitted=true;++generation;
-    ws.abort();audio.close();responses.clear();expected.clear();deferred.clear();inputItems.clear();transcripts.clear();truncateItem.clear();utterance.clear();
+    ws.abort();if(audio.opened||audio.recorder||audio.player)audio.close();responses.clear();expected.clear();deferred.clear();inputItems.clear();transcripts.clear();truncateItem.clear();utterance.clear();
     if(!reason.isEmpty())event({{"type","phone-notice"},{"text",reason}});state();save();
 }
 void Session::send(QJsonObject o){if(!connected)return;if(!o.contains("event_id"))o["event_id"]="event_"+uuid();ws.sendTextMessage(QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));}
@@ -194,7 +230,9 @@ void Session::configure(){
     QJsonObject target=words;target["task_id"]=QJsonObject{{"type","string"},{"description","Exact taskId from the trusted task snapshot"}};
     auto start=words;start["access"]=QJsonObject{{"type","string"},{"enum",QJsonArray{"read_only","exclusive"}},{"description","read_only for research, web queries and terminal commands that only read, wait or calculate; exclusive for edits, GUI interaction, device control, external writes or uncertain effects"}};
     QJsonArray tools{fn("start_task","Start a clear complete new request. While work runs it runs beside that work, at the same time. Never execute discussions or hypotheses.",start,{"original_words","access"}),fn("steer_task","Correct or constrain the named running task, or add what it does next (after its current work). This does not stop it.",target,{"task_id","original_words"}),fn("stop_task","Explicitly cancel the named execution task. Speaking, backchannels and negated stop are not cancellation.",{{"task_id",target["task_id"]}},{"task_id"}),fn("task_status","Read the actual status of a named task.",{{"task_id",target["task_id"]}},{"task_id"}),fn("stop_speaking","Stop narration only; leave all tasks running.",{}, {}),fn("answer_task","Answer a pending task question using the user's explicit answer. Never invent an answer or approve a change implicitly.",{{"task_id",target["task_id"]},{"answers",QJsonObject{{"type","object"},{"additionalProperties",QJsonObject{{"type","array"},{"items",QJsonObject{{"type","string"}}}}}}}},{"task_id","answers"})};
-    QJsonObject input{{"format",QJsonObject{{"type","audio/pcm"},{"rate",24000}}},{"transcription",QJsonObject{{"model","gpt-4o-mini-transcribe"}}},{"turn_detection",QJsonObject{{"type","semantic_vad"},{"eagerness","medium"},{"create_response",false},{"interrupt_response",true}}}};
+    // A call detects the end of speech; push-to-talk's press says it (no detection: the release commits).
+    QJsonObject input{{"format",QJsonObject{{"type","audio/pcm"},{"rate",24000}}},{"transcription",QJsonObject{{"model","gpt-4o-mini-transcribe"}}},
+                      {"turn_detection",press()?QJsonValue(QJsonValue::Null):QJsonValue(QJsonObject{{"type","semantic_vad"},{"eagerness","medium"},{"create_response",false},{"interrupt_response",true}})}};
     if(QRegularExpression("^[a-z]{2}$").match(language).hasMatch()){auto t=input["transcription"].toObject();t["language"]=language;input["transcription"]=t;}
     QJsonObject out{{"format",QJsonObject{{"type","audio/pcm"},{"rate",24000}}},{"voice","marin"}};
     QJsonObject config{{"type","realtime"},{"instructions",prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))},{"output_modalities",QJsonArray{"audio"}},{"tools",tools},{"tool_choice","auto"},{"audio",QJsonObject{{"input",input},{"output",out}}}};
@@ -213,6 +251,7 @@ void Session::onSpeech(bool value){
 void Session::incoming(QJsonObject o){
     const auto type=o["type"].toString();
     if(type=="session.created"){configure();return;}
+    if(type=="session.updated"&&press()){configured=true;phase="connected";state();return;}
     if(type=="session.updated"){if(!configured){inputBlocked=localSpeech||clock.elapsed()-lastVoice<700;if(inputBlocked)event({{"type","phone-notice"},{"text","The connection is ready; pause briefly and repeat the complete request"}});}configured=true;if(audio.opened&&!inputBlocked&&(muted||(audio.sourceReady&&audio.captureReady)))phase="connected";state();return;}
     if(type=="error"){
         auto e=o["error"].toObject();auto code=e["code"].toString();
@@ -241,18 +280,26 @@ void Session::incoming(QJsonObject o){
     } else if(type=="response.created"){
         auto responseId=o["response"].toObject()["id"].toString();
         if(expected.isEmpty()){send({{"type","response.cancel"},{"response_id",responseId}});return;}
-        auto context=expected.takeFirst();responses[responseId]=context;
+        auto context=expected.takeFirst();responses[responseId]=context;if(context.aloud)aloud.insert(responseId);
         if(context.generation!=generation){send({{"type","response.cancel"},{"response_id",responseId}});return;}
         responseActive=true;state();
     } else if(type=="response.output_audio.delta"){
         auto response=o["response_id"].toString();auto context=responses.value(response);
         if(!responses.contains(response)||context.generation!=generation||localSpeech||narrationSuppressed)return;
-        if(playback.response!=response){playStart=audio.written;playedSamples=0;}
+        if(playback.response!=response){playStart=audio.written;playedSamples=0;pressSent=0;}
         if(!playback.append(response,o["item_id"].toString(),QByteArray::fromBase64(o["delta"].toString().toLatin1())))replyTooLong();
     } else if(type=="response.output_audio_transcript.delta"){
-        const auto response=o["response_id"].toString();if(responses.contains(response)&&responses[response].generation==generation){}
+        const auto response=o["response_id"].toString();
+        if(press()&&responses.contains(response)&&responses[response].generation==generation)
+            event({{"type","voice-delta"},{"role","assistant"},{"id",o["item_id"]},{"text",o["delta"]},{"aloud",aloud.contains(response)}},false);
+    } else if(type=="conversation.item.input_audio_transcription.delta"){
+        if(press()&&inputItems.contains(o["item_id"].toString()))event({{"type","voice-delta"},{"role","user"},{"id",utterance},{"text",o["delta"]}},false);
     } else if(type=="response.output_audio_transcript.done"){
-        const auto response=o["response_id"].toString();if(responses.contains(response)&&responses[response].generation==generation)event({{"type","message"},{"id",o["item_id"]},{"role","assistant"},{"text",o["transcript"]}});
+        const auto response=o["response_id"].toString();
+        if(responses.contains(response)&&responses[response].generation==generation){
+            if(aloud.contains(response))event({{"type","aloud"},{"id",o["item_id"]}},false);
+            else event({{"type","message"},{"id",o["item_id"]},{"role","assistant"},{"text",o["transcript"]}});
+        }
     } else if(type=="response.function_call_arguments.done"){
         tool(o["name"].toString(),QJsonDocument::fromJson(o["arguments"].toString().toUtf8()).object(),o["call_id"].toString(),o["response_id"].toString());
     } else if(type=="response.cancelled"){
@@ -260,7 +307,7 @@ void Session::incoming(QJsonObject o){
     } else if(type=="response.done"){
         const auto r=o["response"].toObject();const auto response=r["id"].toString();
         if(responses.contains(response)&&responses[response].generation==generation){responseActive=false;if(r["status"]=="cancelled"&&response==playback.response&&!playback.full)stopSpeaking();state();}
-        responses.remove(response);
+        responses.remove(response);aloud.remove(response);
     }
 }
 void Session::replyTooLong(){
@@ -273,6 +320,18 @@ void Session::replyTooLong(){
     qWarning().noquote()<<"reply audio past"<<ReplyBuffer::MaxPendingBytes/48000<<"s ahead of playback: cut at"<<heardMs<<"ms";
 }
 void Session::stopSpeaking(){
+    if(press()){
+        // The adapter plays: it stops at once, and the reply's record ends where the user stopped
+        // hearing it (what it says it played, else what was sent).
+        if(!playback.item.isEmpty()&&pressSent>0){
+            const qint64 heard=pressHeardMs>=0?std::min<qint64>(pressHeardMs,qint64(pressSent)*1000/24000):qint64(pressSent)*1000/24000;
+            if(configured)send({{"type","conversation.item.truncate"},{"item_id",playback.item},{"content_index",0},{"audio_end_ms",double(heard)}});
+        }
+        if(!playback.item.isEmpty()||pressSent>0)event({{"type","voice-flush"}},false);
+        playback.clear();pressSent=0;
+        if(responseActive){send({{"type","response.cancel"}});responseActive=false;}
+        return;
+    }
     if(!playback.item.isEmpty()&&(!playback.pending.isEmpty()||audio.player)){
         if(audio.flushing){
             // This newer response has not reached playback while the previous
@@ -295,13 +354,13 @@ void Session::tick(){
     const auto now=clock.elapsed();
     if(localSpeech)lastVoice=now;
     if(configured&&inputBlocked&&!localSpeech&&now-lastVoice>=700){inputBlocked=false;send({{"type","input_audio_buffer.clear"}});if(audio.opened&&(muted||(audio.sourceReady&&audio.captureReady)))phase="connected";state();}
-    if(configured&&audio.opened&&!id.isEmpty()){
+    if(configured&&(audio.opened||press())&&!id.isEmpty()){
         if(localSpeech)lastVoice=now;
         if(!submitted&&!localSpeech&&!muted&&!utterance.isEmpty()){
             if(serverSpeech&&!commitPending&&now-lastVoice>=2000){commitPending=true;send({{"type","input_audio_buffer.commit"}});}
             bool complete=!inputItems.isEmpty();QStringList parts;
             for(const auto &item:inputItems){if(!transcripts.contains(item)){complete=false;break;}parts.append(transcripts[item]);}
-            if(complete&&!serverSpeech&&!commitPending&&now-lastVoice>=700){
+            if(complete&&!serverSpeech&&!commitPending&&(press()||now-lastVoice>=700)){
                 submitted=true;QString text=parts.join(" ").trimmed();
                 if(!text.isEmpty()){lastUserText=text;event({{"type","message"},{"id",utterance},{"role","user"},{"text",text}});requestReply({text,utterance,generation,false});}
             } else if(now-lastVoice>10000){
@@ -318,7 +377,11 @@ void Session::tick(){
         // communication service keeps that a little ahead with PulseAudio's silence whatever is played,
         // and holding back while it looked full let silence take the reply's place for good (docs/101,
         // 2026-10-04). A late tick is made up in the next: one 20 ms chunk a tick fell behind and stuttered.
-        if(!audio.flushing&&!localSpeech)
+        if(press()&&!localSpeech&&!playback.pending.isEmpty()){
+            // The adapter's player keeps its own pace: the reply goes as it comes.
+            event({{"type","voice-audio"},{"item",playback.item},{"data",QString::fromLatin1(playback.pending.toBase64())}},false);
+            pressSent+=playback.pending.size()/2;playedSamples=pressSent;playback.pending.clear();lastPlaybackPush=now;
+        } else if(!press()&&!audio.flushing&&!localSpeech)
             for(int n=chunksDue(playedSamples,audio.played,playStart);n>0&&!playback.pending.isEmpty();--n){
                 auto chunk=playback.pending.left(960);playback.pending.remove(0,chunk.size());playedSamples+=chunk.size()/2;lastPlaybackPush=now;audio.play(chunk);
             }
@@ -442,7 +505,9 @@ bool Session::toolsActive(const Task &t){
 void Session::changed(QString tid){
     // A shared task's card is push-to-talk's turn card (the same thread); a read-only one has its own.
     auto *t=tasks.find(tid);if(!t)return;save();if(!t->shared)event({{"type","phone-task"},{"conversation",t->conversation},{"task",t->json()}});
-    if(t->terminal()&&t->conversation==conversation)notices.append(t->text.left(80)+": "+t->status+". "+t->result.left(500));
+    // A task on the conversation's own thread ends with that thread's turn, whose result VoiceAgent has
+    // said (docs/115): said here only for tasks of their own thread (read-only, parallel).
+    if(t->terminal()&&t->conversation==conversation&&!t->shared)notices.append(t->text.left(80)+": "+t->status+". "+t->result.left(500));
     if(configured)send({{"type","session.update"},{"session",QJsonObject{{"type","realtime"},{"instructions",prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))}}}});
     state();
 }

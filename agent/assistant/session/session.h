@@ -7,7 +7,7 @@
 #include <QTimer>
 #include <QWebSocket>
 #include <functional>
-struct ResponseContext {QString text,utterance;quint64 generation=0;bool progress=false;QString instruction;};
+struct ResponseContext {QString text,utterance;quint64 generation=0;bool progress=false;QString instruction;bool aloud=false;};
 class Session : public QObject {
 public:
     std::function<void(QJsonObject)> output;
@@ -33,6 +33,14 @@ public:
     qint64 started=0;   // the call's start, seconds since the epoch (its time on the app's call bar)
     QElapsedTimer clock;
     QString journal,leases,processStart;
+    // The session's kind (docs/115): "call", the phone call with its own audio (Audio), or "press",
+    // push-to-talk, whose microphone and playback are the adapter's (VoiceAgent): a press starts and
+    // commits each utterance, reply audio goes out as events.
+    QString mode="call";
+    bool press() const {return mode=="press";}
+    quint64 pressSent=0;          // press: samples of the current reply sent to the adapter
+    qint64 pressHeardMs=-1;       // press: how much of the reply the user heard when they pressed
+    QSet<QString> aloud;          // press: responses reading a text aloud (heard, not shown)
     QStringList notices;
     QHash<int,std::function<void(QJsonObject)>> callbacks;
     int requests=0;
@@ -57,6 +65,7 @@ public:
     static int chunksDue(quint64 pushed,quint64 played,quint64 start);
     void replyTooLong();
     void stopSpeaking();
+    void pressCommand(const QString &method,const QJsonObject &args,std::function<void(QJsonObject)> done);
     void requestReply(ResponseContext context,QString instruction={});
     QJsonObject replyRequest(const ResponseContext &context,const QString &instruction) const;
     void tool(QString name,QJsonObject args,QString callId,QString responseId);

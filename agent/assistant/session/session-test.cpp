@@ -291,5 +291,44 @@ int main(int argc,char **argv){
             {"turns",QJsonArray{QJsonObject{{"id","dead"},{"status","inProgress"}}}}}}}}});
         check(w.tasks.find(cut)->status=="interrupted","a dead turn is not shown as running");
     }
+    {
+        // covers: agent.voice/E10
+        // Push-to-talk on the coordinator (docs/115): the press is the utterance, the reply goes to the
+        // adapter as events, an interruption flushes it, a reading is heard and never shown.
+        Session p;QList<QJsonObject> out;p.output=[&](QJsonObject o){out.append(o);};
+        p.mode="press";p.id="voice-press";p.conversation="ptt";p.generation=1;
+        auto events=[&](const QString &type){QList<QJsonObject> found;for(const auto &o:out)if(o["type"]=="event"&&o["event"].toObject()["type"]==type)found.append(o["event"].toObject());return found;};
+        p.incoming({{"type","session.updated"}});
+        check(p.configured&&p.phase=="connected"&&!p.inputBlocked,"push-to-talk is ready when the session is, with no call audio");
+        check(!events("voice-state").isEmpty()&&events("phone-state").isEmpty(),"its state is the adapter's, not the app's call bar");
+        QJsonObject reply;p.command("PressStart",{{"press",42.0}},[&](QJsonObject r){reply=r;});
+        check(reply["utterance"]=="press-42"&&p.localSpeech,"a press starts the utterance named by the press");
+        p.command("PressCommit",{},[](QJsonObject){});
+        p.incoming({{"type","input_audio_buffer.committed"},{"item_id","in1"}});
+        p.incoming({{"type","conversation.item.input_audio_transcription.completed"},{"item_id","in1"},{"transcript","用 Krita 画一颗星星"}});
+        p.tick();
+        auto said=events("message");
+        check(!said.isEmpty()&&said.last()["id"]=="press-42"&&said.last()["text"]=="用 Krita 画一颗星星","the release's transcript is the user's words, at once");
+        // A reply, then the user presses again: it stops where it was heard.
+        p.expected.append({"x",{},p.generation,true});p.incoming({{"type","response.created"},{"response",QJsonObject{{"id","r1"}}}});
+        p.incoming({{"type","response.output_audio.delta"},{"response_id","r1"},{"item_id","a1"},{"delta",QString::fromLatin1(QByteArray(4800,'\x02').toBase64())}});
+        p.tick();
+        check(events("voice-audio").size()==1&&p.pressSent==2400,"the reply goes to the adapter as it comes");
+        p.command("PressStart",{{"press",43.0},{"playedMs",50.0}},[](QJsonObject){});
+        check(events("voice-flush").size()==1&&p.playback.pending.isEmpty()&&p.utterance=="press-43","a new press flushes the reply");
+        p.command("PressCancel",{},[](QJsonObject){});
+        check(p.utterance.isEmpty()&&!p.localSpeech,"a cancelled press sends nothing");
+        // "朗读": heard, not a new message.
+        p.responseActive=false;p.expected.clear();p.lastPlaybackPush=-100000;
+        p.command("Narrate",{{"text","The answer."},{"exact",true}},[](QJsonObject){});
+        check(!p.expected.isEmpty()&&p.expected.last().aloud,"a reading is asked for");
+        p.incoming({{"type","response.created"},{"response",QJsonObject{{"id","r2"}}}});
+        const int messages=events("message").size();
+        p.incoming({{"type","response.output_audio_transcript.done"},{"response_id","r2"},{"item_id","a2"},{"transcript","The answer."}});
+        check(events("message").size()==messages&&events("aloud").size()==1,"a reading is heard, never shown as a message");
+        // A task on the conversation's own thread is not announced here (VoiceAgent says its result).
+        auto shared=p.tasks.add("draw",false,"ptt","k");p.tasks.find(shared)->status="completed";p.notices.clear();p.changed(shared);
+        check(p.notices.isEmpty(),"a shared task's result is not said twice");
+    }
     std::puts("session state, transcript fidelity, late events, cancellation and hangup checks passed");
 }
