@@ -551,6 +551,9 @@ def test_the_result_is_said_outside_the_conversation_and_a_question_is_asked(ser
     agent.on_notification('item/completed', {'threadId': 'A', 'turnId': 'T1', 'item': {
         'type': 'agentMessage', 'id': 'm1', 'phase': 'final_answer', 'text': '画好了。要再画一颗月亮来配它吗？'}})
     pump()
+    assert not s.voice.of('Narrate'), 'said when the turn ends: the coordinator knows it ended then'
+    agent.on_notification('turn/completed', {'threadId': 'A', 'turn': {'id': 'T1', 'status': 'completed'}})
+    pump()
     said = s.voice.of('Narrate')[-1]
     assert '要再画一颗月亮来配它吗？' in said['text'] and 'ask the user that question' in said['text']
     assert said['quiet'] == 0 and not said.get('exact')

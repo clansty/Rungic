@@ -2265,6 +2265,11 @@ class VoiceAgent:
             with self.turn_lock:
                 final = self.turn.snapshot() if self.turn else None
                 self.turn = None
+            # The result, once the coordinator too knows the turn ended (it hears the notification first):
+            # said with the task still "running" in its snapshot, the voice said it was still drawing.
+            answer, self.final_answer = getattr(self, 'final_answer', ''), ''
+            if answer and not refused and completed.get('status') == 'completed':
+                self.speak_result(answer)
             if refused:
                 self.refused_turn = None
             elif final and (final['plan'] or final['recent'] or final['files']):
@@ -2336,7 +2341,7 @@ class VoiceAgent:
             self.emit({'type': 'agent-message', 'id': item.get('id'), 'text': item['text'],
                        'final': item.get('phase') == 'final_answer'})
             if item.get('phase') == 'final_answer':
-                self.speak_result(item['text'])
+                self.final_answer = item['text']     # said when the turn ends (turn/completed)
 
     def on_request(self, request_id, method, params):
         if self.phone and self.phone.request(request_id, method, params):

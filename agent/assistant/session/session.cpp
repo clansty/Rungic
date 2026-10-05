@@ -139,7 +139,7 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
             // "朗读": the text read as it is; heard, never shown as a new message.
             ResponseContext c{args["text"].toString(),{},generation,true};c.aloud=true;narrationSuppressed=false;
             requestReply(c,"Read the text under \"Verified updates\" to the user exactly as written, in its own language, adding or leaving out nothing, without comment.");
-        } else if(configured&&!id.isEmpty()&&!localSpeech&&!narrationSuppressed&&quiet)requestReply({args["text"].toString(),{},generation,true},"Say what the message asks, in one or two short sentences. Do not start, steer or stop any task.");
+        } else if(configured&&!id.isEmpty()&&!localSpeech&&!narrationSuppressed&&(quiet||wait==0))requestReply({args["text"].toString(),{},generation,true},"Say what the message asks, in one or two short sentences. Do not start, steer or stop any task.");
         done({{"ok",true}});
     }
     else if(method=="ExternalBusy"){externalBusy=args["busy"].toBool();if(!externalBusy)runQueue();done({{"ok",true}});}
@@ -433,7 +433,10 @@ QJsonObject Session::replyRequest(const ResponseContext &context,const QString &
             // it, it answered a request the user had just made, with no tools ("I can't do that").
             response["conversation"]="none";
             const QString said=lastUserText.isEmpty()?QString():"\nThe user's last words (speak "+(language.isEmpty()?QString("their language"):language)+"): "+lastUserText.left(200);
-            response["input"]=QJsonArray{QJsonObject{{"type","message"},{"role","user"},{"content",QJsonArray{QJsonObject{{"type","input_text"},{"text","Give this update to the user now."+said}}}}}};
+            // To the user, as their one assistant: an update said of "the user" and "execution" came out
+            // as "他们之前说……我把请求传给执行任务" (2026-10-06).
+            response["input"]=QJsonArray{QJsonObject{{"type","message"},{"role","user"},{"content",QJsonArray{QJsonObject{{"type","input_text"},{"text",
+                "Give this update to the user now, in at most two short sentences. Speak to the user (\"you\") and of the work as your own (\"I\")."+said}}}}}};
         }
     }
     return response;
