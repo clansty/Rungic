@@ -19,7 +19,7 @@ def bridge(settings=None):
     obj.lock = threading.RLock()
     obj.threads = {}
     obj.cards, obj.card_timers = {}, {}
-    obj.executor, obj.shared = None, {}
+    obj.executor, obj.shared, obj.side_slots = None, {}, {}
     obj.emit = lambda event, keep=True: None
     obj.history = lambda conversation: []
     return obj
@@ -219,6 +219,12 @@ class Executor:
     def turn_params(self, thread):
         return {'threadId': thread, 'model': 'gpt-x'}
 
+    def main_workspace(self):
+        return 1
+
+    def workspace_settings(self, slot):
+        return {'RUNGIC_WORKSPACE': str(slot), 'WAYLAND_DISPLAY': f'wayland-ws-{slot}'}
+
 
 class Server:
     def __init__(self, fail_start=False):
@@ -254,8 +260,10 @@ def test_work_that_acts_goes_to_the_conversation_s_own_thread():
     obj._rpc({'id': 2, 'method': 'turn/start', 'params': {'threadId': 'main-thread', 'input': [{'type': 'text', 'text': 'draw'}]}})
     assert server.calls[-1] == ('turn/start', {'threadId': 'main-thread', 'model': 'gpt-x', 'input': [{'type': 'text', 'text': 'draw'}]})
     assert written[-1]['result'] == {'turn': {'id': 'turn-new'}}
-    # A second request while the turn works joins it, as push-to-talk does (the cast and the drawing).
+    # A second request while the turn works, with no workspace free for it, joins the turn, as
+    # push-to-talk does (the cast and the drawing).
     executor.running = 'turn-new'
+    obj._side_thread = lambda task, conversation: None
     obj._rpc({'id': 3, 'method': 'thread/start', 'params': {'taskId': 't2', 'readOnly': False, 'conversation': 'c1'}})
     obj._rpc({'id': 4, 'method': 'turn/start', 'params': {'threadId': 'main-thread', 'input': [{'type': 'text', 'text': 'cast it'}]}})
     assert server.calls[-1] == ('turn/steer', {'threadId': 'main-thread', 'expectedTurnId': 'turn-new',
@@ -309,3 +317,30 @@ def test_the_voice_agent_s_executor_methods_are_not_shadowed():
     assert used and used <= methods, used - methods
     for name in used:
         assert not re.search(rf'\bself\.{name}\s*=(?!=)', source), f'VoiceAgent assigns self.{name}'
+
+
+
+# covers: agent.phone-mode/E2
+def test_a_new_job_while_work_runs_goes_on_at_the_same_time(monkeypatch):
+    # 2026-10-05, the user: music in Ardour while the drawing in Krita goes on, "make it parallel":
+    # a thread of its own, in a free workspace of its own, given back when it ends.
+    import types
+    claims, released = [], []
+    fake = types.SimpleNamespace(claim=lambda record, exclude=(): claims.append((record, exclude)) or 2,
+                                 release=lambda slot, pid: released.append(slot))
+    monkeypatch.setitem(sys.modules, 'rungic_cua', types.SimpleNamespace(workspace=fake))
+    monkeypatch.setitem(sys.modules, 'rungic_cua.workspace', fake)
+    executor, server = Executor(running='turn-draw'), Server()
+    obj, written = shared_bridge(executor, server)
+    obj.settings = lambda: {'sandbox': 'danger-full-access', 'config': {}, 'developerInstructions': 'agent.md'}
+    obj.side_slots = {}
+    server.call = lambda method, params, timeout=None: server.calls.append((method, params)) or {'thread': {'id': 'side-music'}}
+    obj._rpc({'id': 1, 'method': 'thread/start', 'params': {'taskId': 'music', 'readOnly': False, 'conversation': 'c1'}})
+    method, params = server.calls[-1]
+    assert method == 'thread/start' and claims[0][1] == (1,), 'not the main work\'s workspace'
+    assert params['config']['mcp_servers.rungic-desktop.env']['RUNGIC_WORKSPACE'] == '2'
+    assert params['config']['shell_environment_policy.set']['WAYLAND_DISPLAY'] == 'wayland-ws-2'
+    assert 'workspace 2' in params['developerInstructions']
+    assert obj.owns('side-music') and 'shared' not in written[-1]['result'], 'its own card and lease'
+    obj.notification('turn/completed', {'threadId': 'side-music', 'turn': {'id': 't', 'status': 'completed'}})
+    assert released == [2], 'its workspace is free again'

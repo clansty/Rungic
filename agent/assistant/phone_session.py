@@ -29,6 +29,7 @@ class PhoneSession:
         # parameters of a new turn there (model, effort), as push-to-talk and typing start one.
         self.executor = executor
         self.shared = {}            # the conversation's thread -> the C++ tasks that went to it
+        self.side_slots = {}        # a parallel acting task's thread -> the workspace it holds
         self.lock = threading.RLock()
         self.write_lock = threading.Lock()
         self.pending = {}
@@ -122,6 +123,8 @@ class PhoneSession:
         if not self.owns(thread):
             return False
         self._track(method, params)
+        if method == 'turn/completed':
+            self._release_side(thread)     # its workspace is free again
         self._write({'type': 'notification', 'method': method, 'params': params})
         return True
 
@@ -246,6 +249,13 @@ class PhoneSession:
             thread = self.executor.main_thread(conversation)
             if not thread:
                 return None
+            if self.executor.running_turn(thread):
+                # A new job while the work runs goes on at the same time (2026-10-05, the user:
+                # "make it parallel"), in a workspace of its own so that two never act on one
+                # screen. A request about the running work is steer_task's. None free: it joins.
+                side = self._side_thread(task, conversation)
+                if side is not None:
+                    return side
             with self.lock:
                 self.shared.setdefault(thread, set()).add(task)
             return {'thread': {'id': thread}, 'shared': True}
@@ -277,6 +287,48 @@ class PhoneSession:
                 self.server().call('turn/steer', {'threadId': thread, 'expectedTurnId': running, 'input': params['input']})
                 return {'turn': {'id': running}, 'joined': True}
         return None
+
+    def _side_thread(self, task, conversation):
+        """A thread of its own for parallel acting work, in a free agent workspace -> the
+        thread/start result, or None (no workspace free, or none offered)."""
+        try:
+            from rungic_cua import workspace
+            slot = workspace.claim({'pid': os.getpid(), 'thread': task}, exclude=(self.executor.main_workspace(),))
+        except Exception:  # noqa: BLE001 - no workspaces here: the work joins the running turn
+            return None
+        if slot is None:
+            return None
+        env = self.executor.workspace_settings(slot)
+        if not env:
+            workspace.release(slot, os.getpid())
+            return None
+        params = self._task_settings(task, False)
+        config = params['config']
+        config['shell_environment_policy.set'] = env
+        config['mcp_servers.rungic-desktop.env'] = {**env, 'RUNGIC_TASK_ID': task}
+        if conversation:
+            params['developerInstructions'] = (params.get('developerInstructions') or '') + self.context(conversation) + (
+                f'\n\nThis task runs at the same time as the conversation\'s main work, in workspace {slot}, '
+                'an assistant\'s screen of its own. Work there; do not touch the main work\'s apps.')
+        result = self.server().call('thread/start', params)
+        thread = (result.get('thread') or {}).get('id')
+        if thread:
+            with self.lock:
+                self.threads[thread] = {'taskId': task, 'conversation': conversation}
+                self.side_slots[thread] = slot
+        else:
+            workspace.release(slot, os.getpid())
+        return result
+
+    def _release_side(self, thread):
+        with self.lock:
+            slot = self.side_slots.pop(thread, None)
+        if slot is not None:
+            try:
+                from rungic_cua import workspace
+                workspace.release(slot, os.getpid())
+            except Exception:  # noqa: BLE001 - a claim of a gone process frees itself
+                pass
 
     def _rpc(self, message):
         params = dict(message.get('params') or {})

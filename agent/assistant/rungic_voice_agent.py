@@ -1865,6 +1865,14 @@ class VoiceAgent:
                 turn['effort'] = agent['effort']
         return turn
 
+    def main_workspace(self):
+        """The workspace the conversation's own work uses."""
+        return WORKSPACE
+
+    def workspace_settings(self, slot):
+        """What puts a parallel task's programs and desktop tools in workspace `slot`, or None."""
+        return workspace_env(slot)
+
     def call_here(self):
         """A call with the Agent is open in this conversation: its voice is the one to speak."""
         phone = getattr(self, 'phone', None)
