@@ -471,7 +471,9 @@ void Session::tool(QString name,QJsonObject args,QString callId,QString response
                 if(!t->input.isEmpty())t->input.append(QJsonObject{{"type","text"},{"text",raw}});
                 changed(tid);result(t->json());
             }
-            else if(t->status=="running"&&!t->turn.isEmpty()){
+            // Words for a task that has ended go on in a new turn on its thread (task_control.py): the
+            // voice sent "then draw a star too" to the finished drawing and it was refused (2026-10-06).
+            else if((t->status=="running"&&!t->turn.isEmpty())||(t->terminal()&&!t->thread.isEmpty())){
                 steeredTasks.insert(tid);
                 // The adapter keeps the words until they reach the task (task_control.py): into its turn,
                 // or, the turn just ended, a new turn on its thread that goes on with them.

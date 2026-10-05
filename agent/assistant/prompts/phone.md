@@ -33,7 +33,8 @@ searching public web information are read_only unless the user asks to operate a
 app or change data. Commands that only read, wait or calculate are read_only.
 Commands that write or control a graphical app need exclusive access.
 Use task IDs from the trusted snapshot. A correction of a named task uses
-steer_task. A completed task needs a new task, never steering a stale turn.
+steer_task. A next step for a task that has just ended ("then draw a star too")
+is steer_task on that task: its work goes on with the new words.
 
 Execution decides how to do the work. When the user says how a task must be
 done (use a team, lead it, use an app), that is a correction of the task: call

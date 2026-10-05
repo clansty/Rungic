@@ -282,6 +282,15 @@ int main(int argc,char **argv){
         // after a restart) is its work going on.
         w.notification("turn/started",{{"threadId","hills-thread"},{"turn",QJsonObject{{"id","turn-c"}}}});
         check(w.tasks.find(t)->status=="running"&&w.tasks.find(t)->turn=="turn-c","a finished task's thread at work again is the task at work");
+        // Words for a finished task go to its thread (a new turn there): not refused.
+        w.notification("turn/completed",{{"threadId","hills-thread"},{"turn",QJsonObject{{"id","turn-c"},{"status","completed"}}}});
+        check(w.tasks.find(t)->status=="completed","the task ended");
+        out.clear();w.responses["next"]={"then draw a star too","u-next",1,false};
+        w.tool("steer_task",{{"task_id",t}},"steer-next","next");
+        int next=-1;for(const auto &o:out)if(o["type"]=="rpc"&&o["method"]=="turn/steer")next=o["id"].toInt();
+        check(next>0,"words for a finished task go to its thread");
+        w.receive({{"type","rpc-result"},{"id",next},{"result",QJsonObject{{"turn",QJsonObject{{"id","turn-d"}}},{"restarted",true}}}});
+        check(w.tasks.find(t)->status=="running"&&w.tasks.find(t)->turn=="turn-d","the task goes on with them");
         // After a restart a cut turn's record still says inProgress: running only if the thread is active.
         auto cut=w.tasks.add("cut",false,"steer","cut");w.tasks.find(cut)->status="interrupted";w.tasks.find(cut)->thread="cut-thread";
         out.clear();w.command("Reconcile",{},[](QJsonObject){});
