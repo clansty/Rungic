@@ -1,5 +1,5 @@
-<!-- What both voices say and do: push-to-talk's (realtime.md) and the call's (phone.md). Written into
-     both by tools/agent_capabilities.py render --write; {{capabilities}} is capabilities.yaml. -->
+<!-- What the voice says and does, in a call and in push-to-talk (phone.md, docs/115). Written into
+     it by tools/agent_capabilities.py render --write; {{capabilities}} is capabilities.yaml. -->
 
 ## Where you are (this device)
 

@@ -43,6 +43,8 @@ class PhoneSession:
         self.card_timers = {}
         self.serial = 0
         self.snapshot = {'sessionId': '', 'phase': 'closed', 'tasks': [], 'conversation': ''}
+        # Push-to-talk's session on the same coordinator (docs/115): its state is VoiceAgent's only.
+        self.voice = {'sessionId': '', 'phase': 'closed', 'conversation': ''}
         self.process = subprocess.Popen(['sh', '-c', '[ ! -r /etc/profile.d/proxy.sh ] || . /etc/profile.d/proxy.sh; exec "$@"', 'rungic-phone-session', executable], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=None, text=True, bufsize=1)
         threading.Thread(target=self._read, daemon=True).start()
@@ -86,13 +88,14 @@ class PhoneSession:
             with self.lock:
                 self.pending.pop(rid, None)
 
-    def start(self, conversation):
-        if not self.foreground():
+    def start(self, conversation, mode='call', instructions=None):
+        """A call (`mode` call) or push-to-talk's voice (press, docs/115) in `conversation`."""
+        if mode == 'call' and not self.foreground():
             raise RuntimeError('Open Plasma before starting phone mode')
-        return self.command('StartPhoneMode', {'conversationId': conversation,
+        return self.command('StartPhoneMode', {'conversationId': conversation, 'mode': mode,
                             # Desktop language is a reply fallback, not a forced
                             # transcription language: the user may speak another.
-                            'instructions': self.prompt() + self.context(conversation), 'language': ''})
+                            'instructions': (instructions or self.prompt()) + self.context(conversation), 'language': ''})
 
     def context(self, conversation):
         records = []
@@ -489,6 +492,10 @@ class PhoneSession:
                     event.set()
             self.emit({'type': 'phone-state', 'conversation': self.snapshot.get('conversation', ''),
                        'sessionId': '', 'phase': 'closed', 'microphone': False}, False)
+            if hasattr(self, 'voice'):
+                with self.lock:
+                    self.voice.update(sessionId='', phase='closed')
+                self.emit({'type': 'voice-state', 'sessionId': '', 'phase': 'closed', 'mode': 'press'}, False)
 
     def _handle(self, message):
         kind = message.get('type')
@@ -502,6 +509,9 @@ class PhoneSession:
             threading.Thread(target=self._rpc, args=(message,), daemon=True).start()
         elif kind == 'event':
             event = message['event']
+            if event.get('type') == 'voice-state':
+                with self.lock:
+                    self.voice.update(event)
             if event.get('type') == 'phone-state':
                 with self.lock:
                     self.snapshot.update(event)

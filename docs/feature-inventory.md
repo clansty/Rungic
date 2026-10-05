@@ -16,7 +16,7 @@
 
 #### 按住说话的语音对话
 
-`agent.voice` · Linux 系统功能 — 常驻语音服务由 GPT Realtime 处理对话，由 Codex 执行任务。用户按住说话，松手发送。助手先回应，再将任务交给 Agent 执行，并朗读结果。
+`agent.voice` · Linux 系统功能 — 常驻语音服务由 GPT Realtime 处理对话（和电话共用一个协调器，docs/115），由 Codex 执行任务。用户按住说话，松手发送。助手先回应，再将任务交给 Agent 执行，并朗读结果。
 
 经由接口：`audio`、`platform-bridge`
 
@@ -32,14 +32,13 @@
 - **E10** 只有用户自己说的或打的话才会交给执行。任务结果、进度和 Agent 的提问都不算请求，语音只念给用户听，并等用户回答。语音没等用户开口就自己开的一轮会被当场停下，不显示成任务。（单元测试）
 
 注意：
-- Codex 的实时会话固定用服务端 VAD（静音 500 ms 即结束一轮），app-server 不提供修改或手动提交的接口。所以按住期间先存本地、松手后整段上传并补 900 ms 静音。 [docs/59-voice-agent.md](../docs/59-voice-agent.md) [docs/87-agent-app-redesign.md](../docs/87-agent-app-redesign.md)
+- 以前用 Codex 的实时会话封装：它固定用服务端 VAD（静音 500 ms 即结束一轮），而且把 Agent 的输出以用户身份（"[BACKEND]" 前缀）放进语音对话，语音曾把 Agent 的提问当成用户请求自己开工。现在改用电话的协调器（按住即一句，结果用带外回应播报）。 [docs/115-push-to-talk-coordinator.md](../docs/115-push-to-talk-coordinator.md) [docs/59-voice-agent.md](../docs/59-voice-agent.md)
 - Codex 用 WebSocket 连实时语音时只接受 API Key（ChatGPT 登录也要另配 Key）。WebRTC 走 UDP，用户的 HTTP 代理转发不了。 [docs/59-voice-agent.md](../docs/59-voice-agent.md) [docs/101-codex-sign-in-and-api-key.md](../docs/101-codex-sign-in-and-api-key.md)
-- 语音模型的指令要经 thread/realtime/start 的 prompt 传入。realtimeStartInstructions 只进 Agent 上下文。 [docs/59-voice-agent.md](../docs/59-voice-agent.md)
 - 用手机扬声器外放合成语音再由手机麦克风录入的自测不成立：Android 采集带回声消除，会把本机播放的声音抵消掉。 [docs/59-voice-agent.md](../docs/59-voice-agent.md)
 - 投屏时音量键调的是电视那一路。手机扬声器的媒体音量要在未投屏时调。输入转写常为繁体，显示时转简体。 [docs/59-voice-agent.md](../docs/59-voice-agent.md)
 - 实时模型对“情绪不增加话语”这类规则执行得不严格。语气未经人耳评估。 [docs/59-voice-agent.md](../docs/59-voice-agent.md)
 
-文档：[docs/59-voice-agent.md](../docs/59-voice-agent.md)、[docs/87-agent-app-redesign.md](../docs/87-agent-app-redesign.md)、[docs/89-agent-progress.md](../docs/89-agent-progress.md)、[docs/agent-ready-interfaces.md](../docs/agent-ready-interfaces.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)
+文档：[docs/59-voice-agent.md](../docs/59-voice-agent.md)、[docs/87-agent-app-redesign.md](../docs/87-agent-app-redesign.md)、[docs/89-agent-progress.md](../docs/89-agent-progress.md)、[docs/agent-ready-interfaces.md](../docs/agent-ready-interfaces.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)、[docs/115-push-to-talk-coordinator.md](../docs/115-push-to-talk-coordinator.md)
 
 #### 长按 Home 呼出语音助手
 
@@ -603,11 +602,11 @@ Agent 在自己的工作区（或用户指定的桌面）上打开应用、看�
 
 `agent.instructions` · Linux 系统功能 — 用户目录保留可编辑的 Agent 提示词和技能副本。升级不覆盖用户修改。改动也能在进行中的对话里很快生效。
 
-- **E1** 提示词（agent.md、realtime.md）和每个技能在用户目录有真实的副本。升级时没改过的副本跟随新默认，改过的保留，新默认另存为 NAME.default。（单元测试、人工）
-- **E2** 改了 agent.md 或技能后约 30 秒内（Agent 空闲、没在说话时），进行中的对话也用上新指令。改了 realtime.md 在空闲时重启实时会话。（单元测试、人工）
+- **E1** 提示词（agent.md、phone.md）和每个技能在用户目录有真实的副本。升级时没改过的副本跟随新默认，改过的保留，新默认另存为 NAME.default。（单元测试、人工）
+- **E2** 改了 agent.md 或技能后约 30 秒内（Agent 空闲、没在说话时），进行中的对话也用上新指令。改了语音的提示词（phone.md）在空闲时重启按住说话的语音会话。（单元测试、人工）
 - **E3** 包里删掉的默认技能，用户没改过的副本一起删掉，改过的保留。（单元测试）
 - **E4** 每个桌面用户首次登录时自动配好 rungic-desktop MCP 服务和技能目录（kconf_update，重复执行无副作用）。（单元测试）
-- **E5** 三份提示词（agent.md、phone.md、realtime.md）里的能力清单由同一个 capabilities.yaml 生成，各用对应模型的口吻；清单过期时测试失败。（单元测试）
+- **E5** 两份提示词（agent.md、phone.md）里的能力清单由同一个 capabilities.yaml 生成，各用对应模型的口吻；清单过期时测试失败。（单元测试）
 
 注意：
 - Codex 把开发者指令固定在对话加载的那一刻。同一个 app-server 里再次恢复只是重新加入。包升级只 reload systemd、不重启用户服务。所以要注入新指令，而不是等下次打开。 [docs/59-voice-agent.md](../docs/59-voice-agent.md) [docs/88-agent-visible-work.md](../docs/88-agent-visible-work.md)

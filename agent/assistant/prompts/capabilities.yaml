@@ -1,5 +1,5 @@
 # What the executor (the Codex task agent) can do on this phone: one source for the capability
-# sections of agent.md, phone.md and realtime.md. After a change, run
+# sections of agent.md and phone.md. After a change, run
 #   python3 tools/agent_capabilities.py render --write
 # tools/tests/test_agent_capabilities.py fails while a prompt is out of date.
 # This file is not installed: the prompts carry the rendered text.

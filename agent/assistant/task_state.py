@@ -334,7 +334,7 @@ class TurnState:
 
     def facts(self, now: float | None = None) -> str:
         """What the voice may say, by tense: done, now, next. Only facts; an intention says so.
-        For the voice model: English labels around the card's words (prompts/realtime.md)."""
+        For the voice model: English labels around the card's words (prompts/phone.md)."""
         now = now if now is not None else time.time()
         lines = [f'Time so far: {round(now - self.started)} s; the task is still running.']
         if self.plan:

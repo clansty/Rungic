@@ -61,13 +61,6 @@ RELEASE_PLAYER_S = 1.5       # after a reply, until its tail left the sink's buf
 CHUNK_MS = 100
 MIC = 'android_microphone'
 PHONE_SINK = 'android_phone'     # always the phone itself (shared/media/media-bridge.py)
-END_SILENCE_MS = 900         # after release, so the server VAD sees the end of speech
-# Codex fixes the realtime session's turn detection to server VAD with 500 ms of
-# silence (codex-api realtime_websocket/methods_v2.rs). A pause while the button is
-# still held would end the user's turn and the model would answer half a sentence.
-# While held, pauses are shortened so the server never sees 500 ms of silence.
-PAUSE_KEEP_MS = 200          # the start of a pause is sent as is
-PAUSE_PREROLL_MS = 140       # and the end of a longer one, before speech resumes
 IDLE_STOP_S = 600            # stop an unused realtime session (cost)
 # Apps switched into the agent's workspace (one instance per user: WeChat, a browser profile;
 # rungic_cua.switch, docs/research/91) go back to the user's phone this long after the agent's
@@ -78,10 +71,6 @@ RESTORE_APPS_S = 120
 HANDS_FREE_END_MS = 900
 HANDS_FREE_NO_SPEECH_S = 8   # nothing said by then: stop listening, send nothing
 HANDS_FREE_MAX_S = 60
-# The voice (Realtime API): Codex's default is gpt-realtime-1.5. The emotion of
-# the voice is chosen by the model per response from prompts/realtime.md; the
-# API has no emotion parameter, it follows instructions.
-REALTIME_MODEL = 'gpt-realtime-2.1-mini'
 # The agent (Codex): the fast model; tasks here are short device operations.
 # Titles the service gives are stored as keys and put in words when shown, in the desktop's
 # language: a conversation is untitled ('') until its first message names it, and the one holding
@@ -435,9 +424,15 @@ def agent_instructions():
     return prompt('agent.md') + language_note()
 
 
+# Push-to-talk's voice runs on the call's coordinator (docs/115), with the call's prompt (phone.md) and
+# this note on how the user talks.
+PRESS_NOTE = ('\n\n## This session\n\nThe user talks with you by holding the talk button (push-to-talk), not in a '
+              'call: each press is one complete utterance, and the user hears you when they do not press.\n')
+
+
 def realtime_instructions():
-    """The realtime voice model's prompt: realtime.md and the desktop's language."""
-    return prompt('realtime.md') + language_note()
+    """Push-to-talk's voice prompt: phone.md, how the user talks, and the desktop's language."""
+    return prompt('phone.md') + PRESS_NOTE + language_note()
 
 
 def shown_title(entry, main=False):
@@ -665,74 +660,18 @@ class BackgroundTurn:
         return f'failed: {error.get("message") or code or "turn failed"}'
 
 
-class PauseGate:
-    """Shortens pauses in push-to-talk audio (see PAUSE_KEEP_MS).
-
-    A 20 ms frame counts as a pause when it is quieter than the press's noise
-    floor (a low percentile of the levels so far) by less than 10 dB, and at
-    least 12 dB below its loudest speech. Only the middle of a pause is dropped:
-    its first PAUSE_KEEP_MS and its last PAUSE_PREROLL_MS (soft onsets) are sent.
-    """
-    FRAME = RATE * 2 * 20 // 1000
-
-    def __init__(self):
-        self.levels = []
-        self.peak = -120.0
-        self.quiet_ms = 0
-        self.held = []           # dropped frames kept for the preroll
-        self.dropped_ms = 0
-        self.rest = b''
-
-    @staticmethod
-    def level(frame):
-        samples = array.array('h', frame)
-        rms = math.sqrt(sum(x * x for x in samples) / max(1, len(samples)))
-        return 20 * math.log10(max(rms, 1.0) / 32768)
-
-    def quiet(self, db):
-        self.levels.append(db)
-        if len(self.levels) > 500:           # the last 10 s
-            del self.levels[0]
-        self.peak = max(self.peak, db)
-        ordered = sorted(self.levels)
-        floor = ordered[len(ordered) // 5]
-        return db < min(max(floor + 10, -55.0), self.peak - 12)
-
-    def feed(self, data):
-        """Audio to send for this input (possibly less, possibly held frames first)."""
-        data = self.rest + data
-        cut = len(data) - len(data) % self.FRAME
-        self.rest = data[cut:]
-        out = []
-        for i in range(0, cut, self.FRAME):
-            frame = data[i:i + self.FRAME]
-            if not self.quiet(self.level(frame)):
-                out.extend(self.held)
-                self.held = []
-                self.quiet_ms = 0
-                out.append(frame)
-                continue
-            self.quiet_ms += 20
-            if self.quiet_ms <= PAUSE_KEEP_MS:
-                out.append(frame)
-            else:
-                self.held.append(frame)
-                if len(self.held) > PAUSE_PREROLL_MS // 20:
-                    self.held.pop(0)
-                    self.dropped_ms += 20
-        return b''.join(out)
-
-    def finish(self):
-        """At release: the rest of the input; the pause that follows ends the turn."""
-        rest, self.rest, self.held = self.rest, b'', []
-        return rest
+def level(frame):
+    """The level of a frame of 16-bit audio, in dBFS."""
+    samples = array.array('h', frame)
+    rms = math.sqrt(sum(x * x for x in samples) / max(1, len(samples)))
+    return 20 * math.log10(max(rms, 1.0) / 32768)
 
 
 class Endpointer:
     """Whether speech has been heard, and whether it has ended (hands-free).
 
     A 20 ms frame is speech when it is at least 12 dB above the noise floor (a low
-    percentile of the levels so far) and above -50 dBFS: absolute, unlike PauseGate,
+    percentile of the levels so far) and above -50 dBFS: absolute,
     so that a press that began in silence tells noise from speech.
     """
     FRAME = RATE * 2 * 20 // 1000
@@ -758,7 +697,7 @@ class Endpointer:
         self.rest = data[cut:]
         loudest = -120.0
         for i in range(0, cut, self.FRAME):
-            db = PauseGate.level(data[i:i + self.FRAME])
+            db = level(data[i:i + self.FRAME])
             loudest = max(loudest, db)
             self.levels.append(db)
             if len(self.levels) > 500:
@@ -823,7 +762,6 @@ class VoiceAgent:
         self.player = None
         self.recorder = None
         self.mic_buffer = b''
-        self.gate = PauseGate()
         # A press's audio stays here until it is sent (docs/87): released to send, it goes up
         # at once; cancelled or turned into text, nothing reached the realtime session, whose
         # input buffer could not be cleared (app-server has no such call) and would have
@@ -831,7 +769,6 @@ class VoiceAgent:
         # "朗读" (docs/87): the voice says an answer again; that speech is not a new message.
         self.aloud_pending = False   # asked; the next assistant segment is the reading
         self.aloud_items = set()     # transcript segments of readings: heard, never shown
-        self.held = []               # gated chunks of this press, not yet uploaded
         self.press_audio = b''       # all of this press, for speech-to-text
         self.call_start_lock = threading.Lock()
         self.call = None             # the proxied call, when the assistant talks in a call (docs/63)
@@ -853,7 +790,7 @@ class VoiceAgent:
         self.refused_turn = None        # a turn the voice started of itself: stopped, never shown
         # Transcript segments being spoken or transcribed: item id -> (role, press, start time).
         self.segments = {}
-        # thread/realtime/start was sent and neither started nor closed has come back:
+        # Push-to-talk's voice session was asked for and has not said it is connected or closed:
         # a press in the meantime waits for that session instead of starting another.
         self.realtime_starting = False
         # Audio must reach the server in order: one sender thread, fixed chunks.
@@ -1315,12 +1252,11 @@ class VoiceAgent:
         resumed.set()
 
     def start_realtime(self):
+        """Push-to-talk's voice: a press-mode session of the coordinator the call uses (docs/115). Its
+        state comes back as voice-state (phone_emit): realtime and realtime_ready."""
         if self.phone_starting or (self.phone and self.phone.snapshot.get("sessionId")):
             return
-        # The thread must be resumed in Codex first (open_conversation resumes it behind).
-        thread_id, resumed = self.thread_id, self.resumed
-        if not resumed.wait(60) or self.thread_id != thread_id:
-            return
+        thread_id = self.thread_id
         with self.lock:
             if self.phone_starting or (self.phone and self.phone.snapshot.get("sessionId")) or self.realtime or self.realtime_starting or not self.thread_id or not self.server:
                 return
@@ -1330,32 +1266,84 @@ class VoiceAgent:
             # dropped the audio sent to the first (a press right after opening).
             self.realtime_starting = True
             self.realtime_ready.clear()
-            try:
-                self.server.call('thread/realtime/start', {
-                    'threadId': self.thread_id, 'model': REALTIME_MODEL,
-                    'outputModality': 'audio', 'transport': {'type': 'websocket'},
-                    # Instructions of the realtime model itself (replaces Codex's default,
-                    # which prompts/realtime.md includes).
-                    'prompt': realtime_instructions()})
-                self.realtime_prompt = hashlib.sha256(realtime_instructions().encode()).hexdigest()
-            except Exception as error:
-                self.realtime_starting = False
-                self.emit({'type': 'error', 'text': _('Voice connection failed: {error}').format(error=error)})
-                return
+        try:
+            instructions = realtime_instructions()
+            self.phone_session().start(thread_id, mode='press', instructions=instructions)
+            self.realtime_prompt = hashlib.sha256(instructions.encode()).hexdigest()
+        except Exception as error:
+            self.realtime_starting = False
+            self.emit({'type': 'error', 'text': _('Voice connection failed: {error}').format(error=error)})
+            return
         if not self.realtime_ready.wait(20):
             self.realtime_starting = False   # never started: the next press tries again
 
     def stop_realtime(self):
-        if (self.realtime or self.realtime_starting) and self.thread_id:
+        phone = getattr(self, 'phone', None)
+        session = phone.voice.get('sessionId') if phone else ''
+        if session and phone.alive():
             try:
-                self.server.call('thread/realtime/stop', {'threadId': self.thread_id}, timeout=5)
-            except Exception:
+                phone.command('StopPhoneMode', {'sessionId': session}, timeout=5)
+            except Exception:  # noqa: BLE001 - a coordinator gone has no session
                 pass
         self.realtime = False
         self.realtime_starting = False
         self.realtime_ready.clear()
         self.segments.clear()
         GLib.idle_add(self.stop_audio)
+
+    def press_post(self, method, args=None):
+        """A push-to-talk command to the coordinator, in order with the press's audio (upload_loop)."""
+        self.uploads.put((method, args or {}))
+
+    def voice_event(self, event):
+        """Push-to-talk's voice (the coordinator's press mode, docs/115) -> the chat and the player.
+        -> True when the event is the voice's own (not for the app as it is)."""
+        kind = event.get('type')
+        if kind == 'voice-state':
+            connected = bool(event.get('sessionId')) and event.get('phase') == 'connected'
+            was = self.realtime
+            self.realtime = connected
+            if connected:
+                self.realtime_starting = False
+                self.realtime_ready.set()
+            elif not event.get('sessionId'):
+                self.realtime_starting = False
+                self.realtime_ready.clear()
+            if was != connected:
+                GLib.idle_add(self.set_state)
+            return True
+        if kind == 'voice-audio':
+            GLib.idle_add(self.play, {'data': event.get('data', ''), 'sampleRate': RATE, 'aloud': event.get('aloud', False)})
+            return True
+        if kind == 'voice-flush':
+            GLib.idle_add(self.stop_audio)
+            return True
+        if kind == 'voice-delta':
+            if event.get('aloud'):
+                return True
+            role = event.get('role') or 'assistant'
+            item = event.get('id') or ''
+            if item not in self.segments:
+                self.segments[item] = (role, self.press if role == 'user' else 0, time.time())
+            delta = {'type': 'delta', 'role': role, 'id': item, 'text': event.get('text', '')}
+            if role == 'user':
+                delta['press'] = self.segments[item][1]
+            self.emit(delta, keep=False)
+            return True
+        if kind == 'aloud':
+            self.aloud_pending = False
+            return True
+        if kind == 'message' and not self.call_here():
+            item = event.get('id') or ''
+            role, press, started = self.segments.pop(item, (event.get('role'), 0, 0))
+            if event.get('role') == 'user' and item.startswith('press-'):
+                event['press'] = int(item[6:] or 0)
+                self.store.touch(self.thread_id, event.get('text', ''))
+            elif started:
+                event['started'] = started
+            if event.get('role') != 'user':
+                self.muted = False
+        return False
 
     def close_conversation(self, thread_id=None):
         """Close the open conversation (only if it is `thread_id`, when given)."""
@@ -1491,12 +1479,12 @@ class VoiceAgent:
             return False
         if not self.realtime:
             threading.Thread(target=self.start_realtime, daemon=True).start()
+        # How much of the reply being spoken the user heard: the voice's record of it ends there.
+        heard_ms = max(0, self.reply_audio_ms - int(max(0.0, self.playing_until - time.monotonic()) * 1000))
         self.stop_audio()           # barge in: stop speaking at once
         self.talking = True
         self.ensure_recorder()
         self.mic_buffer = b''
-        self.gate = PauseGate()
-        self.held = []
         self.press_audio = b''
         self.endpointer = Endpointer()
         self.hands_free = False
@@ -1505,6 +1493,8 @@ class VoiceAgent:
         # here instead of sending it to the assistant's own realtime session.
         self.owner_audio = b'' if self.call and self.call.active else None
         self.press = int(time.time() * 1000)
+        if self.owner_audio is None:
+            self.press_post('PressStart', {'press': self.press, 'playedMs': heard_ms})
         self.recorder.set_state(Gst.State.PLAYING)
         self.mic_chunks = 0
         log('talk: start, reply on', self.reply_sink or 'default sink')
@@ -1547,15 +1537,16 @@ class VoiceAgent:
 
     def cancel_talking(self):
         """Hands-free heard nothing, or the overlay was dismissed while listening: close
-        the microphone and send nothing more (what was sent stays below a turn: no stop)."""
+        the microphone; what was sent of the press is cleared (PressCancel)."""
         if not self.talking:
             return False
         self.talking = False
         self.hands_free = False
         if self.recorder is not None:
             self.recorder.set_state(Gst.State.READY)
+        if self.owner_audio is None:
+            self.press_post('PressCancel')
         self.mic_buffer = b''
-        self.held = []
         self.press_audio = b''
         log('talk: cancelled, nothing sent')
         self.emit({'type': 'listen-cancelled', 'press': self.press}, keep=False)
@@ -1580,16 +1571,12 @@ class VoiceAgent:
             threading.Thread(target=self.instruct_call, args=(audio,), daemon=True).start()
             self.set_state()
             return False
-        log(f'talk: stop after {self.mic_chunks * CHUNK_MS} ms of audio, {self.gate.dropped_ms} ms of pauses left out')
-        rest = self.gate.feed(self.mic_buffer) + self.gate.finish()
+        log(f'talk: stop after {self.mic_chunks * CHUNK_MS} ms of audio')
+        if self.mic_buffer:
+            self.press_post('PressAudio', {'pcm': base64.b64encode(self.mic_buffer).decode()})
         self.mic_buffer = b''
-        for chunk in self.held:
-            self.uploads.put(chunk)
-        self.held = []
         self.press_audio = b''
-        if rest:
-            self.uploads.put(rest)
-        self.uploads.put(bytes(RATE * 2 * END_SILENCE_MS // 1000))
+        self.press_post('PressCommit')
         self.emit({'type': 'talk-sent', 'press': self.press}, keep=False)
         self.set_state()
         return False
@@ -1617,28 +1604,30 @@ class VoiceAgent:
                     GLib.idle_add(self.stop_talking)
                 elif not self.endpointer.heard and elapsed > HANDS_FREE_NO_SPEECH_S:
                     GLib.idle_add(self.cancel_talking)
+            # Sent while held (docs/115): the press is the utterance and a cancel clears it, so the
+            # voice has heard all of it at the release.
             chunk = RATE * 2 * CHUNK_MS // 1000
             while len(self.mic_buffer) >= chunk:
-                send = self.gate.feed(self.mic_buffer[:chunk])
-                if send:
-                    self.held.append(send)
+                self.press_post('PressAudio', {'pcm': base64.b64encode(self.mic_buffer[:chunk]).decode()})
                 self.mic_buffer = self.mic_buffer[chunk:]
                 self.mic_chunks += 1
         return Gst.FlowReturn.OK
 
     def upload_loop(self):
         while True:
-            self.append_audio(self.uploads.get())
+            self.press_send(*self.uploads.get())
+
+    def press_send(self, method, args):
+        """One push-to-talk command, once the voice is connected (a press right after opening waits)."""
+        if not self.realtime_ready.wait(15) or not self.phone:
+            return
+        self.phone.post(method, args)
 
     def append_audio(self, data):
-        if not self.realtime_ready.wait(15) or not self.thread_id:
-            return
-        try:
-            self.server.call('thread/realtime/appendAudio', {'threadId': self.thread_id, 'audio': {
-                'data': base64.b64encode(data).decode(), 'sampleRate': RATE, 'numChannels': 1,
-                'samplesPerChannel': len(data) // 2}}, timeout=10)
-        except Exception as error:
-            log('appendAudio', error)
+        """Audio as one press (test_turn)."""
+        self.press_post('PressStart', {'press': int(time.time() * 1000)})
+        self.press_post('PressAudio', {'pcm': base64.b64encode(data).decode()})
+        self.press_post('PressCommit')
 
     def call_in_progress(self) -> bool:
         return bool(self.call and self.call.phase in ('agent', 'user'))
@@ -1653,7 +1642,7 @@ class VoiceAgent:
             return False
         # Speak off ("朗读回答") silences replies, not a reading the user asked for ("朗读" on one answer):
         # asked and not begun, or its segment still going.
-        reading = self.aloud_pending or bool(self.aloud_items)
+        reading = self.aloud_pending or bool(self.aloud_items) or bool(audio.get('aloud'))
         if self.muted or not (self.prefs['speak'] or reading):
             return False
         data = base64.b64decode(audio['data'])
@@ -2058,7 +2047,11 @@ class VoiceAgent:
         self.was_at_work = working
 
     def phone_emit(self, event, keep=True):
-        """The call's events, as any; its tasks' changes also change whether the agent is at work."""
+        """The call's events, as any; its tasks' changes also change whether the agent is at work.
+        Push-to-talk's voice events (docs/115) go to the chat and the player (voice_event)."""
+        voice_event = getattr(self, 'voice_event', None)     # absent in parts built without it (tests)
+        if voice_event is not None and voice_event(event):
+            return
         if event.get('type') in ('phone-state', 'phone-task'):
             self.update_at_work()
         self.emit(event, keep)
@@ -2079,15 +2072,25 @@ class VoiceAgent:
             self.emit({'type': 'task', **snapshot}, keep=False)
         return False
 
+    def speak_result(self, text):
+        """A turn's result, said by the voice outside the conversation and with no tools (docs/115):
+        a result is no request; a question at its end is asked, and the user answers."""
+        if not (self.call_here() or (self.realtime and self.phone)) or not self.prefs.get('speak', True):
+            return
+        words = ('Progress: the task is finished. Its result, which the user sees on the screen:\n' + text.strip()[:1500]
+                 + '\nTell the user the main result in one or two short sentences, in the language you speak with them. '
+                 'Do not read it all. If it ends with a question or an offer, ask the user that question and wait.')
+        self.phone.post('Narrate', {'text': words, 'quiet': 1500 if self.call_here() else 0})
+
     def speak_progress(self, text):
         log('progress:', ' | '.join(line for line in text.splitlines()[1:] if line)[:400])
         if self.call_here():
             self.phone.post('Narrate', {'text': text})     # a call's voice says it (docs/101)
             return
-        try:
-            self.server.call('thread/realtime/appendSpeech', {'threadId': self.thread_id, 'text': text}, timeout=10)
-        except Exception as error:
-            log('appendSpeech', error)
+        # Push-to-talk's voice says it outside the conversation, with no tools (docs/115); its pace is
+        # progress_tick's.
+        if self.realtime and self.phone:
+            self.phone.post('Narrate', {'text': text, 'quiet': 0})
 
     # ---- codex events (reader thread) -----------------------------------------------
     @staticmethod
@@ -2205,55 +2208,6 @@ class VoiceAgent:
             background.on(method, params)     # a curation turn: never the open conversation's
         elif params.get('threadId') and params['threadId'] != self.thread_id:
             return
-        elif method == 'thread/realtime/outputAudio/delta':
-            GLib.idle_add(self.play, params['audio'])
-        elif method == 'thread/realtime/started':
-            self.realtime = True
-            self.realtime_starting = False
-            self.realtime_ready.set()
-            GLib.idle_add(self.set_state)
-        elif method == 'thread/realtime/closed':
-            self.realtime = False
-            self.realtime_starting = False
-            self.realtime_ready.clear()
-            GLib.idle_add(self.set_state)
-        elif method == 'thread/realtime/error':
-            self.emit({'type': 'error', 'text': params.get('message', '')})
-        # Transcripts by segment (item id), not the role-only transcript/delta and
-        # transcript/done: the user's transcription often finishes after the reply
-        # has begun streaming, and the chat has to tell the two streams apart.
-        elif method == 'thread/realtime/item/started' and (params.get('item') or {}).get('type') == 'transcriptSegment':
-            item = params['item']
-            role = 'user' if item.get('role') == 'user' else 'assistant'
-            if role == 'assistant' and self.aloud_pending:
-                self.aloud_pending = False
-                self.aloud_items.add(item['id'])
-            self.segments[item['id']] = (role, self.press if role == 'user' else 0, time.time())
-        elif method == 'thread/realtime/item/transcript/delta':
-            if params.get('itemId') in self.aloud_items:
-                return
-            role, press, _started = self.segments.get(params.get('itemId'), ('assistant', 0, 0))
-            event = {'type': 'delta', 'role': role, 'id': params.get('itemId'), 'text': params.get('delta', '')}
-            if role == 'user':
-                event['press'] = press
-            self.emit(event, keep=False)
-        elif method == 'thread/realtime/item/completed' and (params.get('item') or {}).get('type') == 'transcriptSegment':
-            item = params['item']
-            role, press, started = self.segments.pop(item['id'], ('user' if item.get('role') == 'user' else 'assistant', self.press, 0))
-            if role != 'user':
-                self.muted = False      # the reply cut by the stop button has ended
-            if item['id'] in self.aloud_items:
-                self.aloud_items.discard(item['id'])
-                return                  # a reading: heard, not a message
-            text = (item.get('text') or '').strip()
-            if text:
-                # When the segment began: an acknowledgement begun before agent work
-                # stays a bubble above it, also when the history is replayed.
-                event = {'type': 'message', 'role': role, 'id': item['id'], 'text': text, 'started': started}
-                if role == 'user':
-                    self.store.touch(self.thread_id, text)
-                    event['press'] = press
-                self.emit(event)
         elif method == 'turn/started':
             self.turn_id = (params.get('turn') or {}).get('id')
             self.agent_busy = True
@@ -2380,6 +2334,8 @@ class VoiceAgent:
                         self.turn.on_commentary(item['text'])
             self.emit({'type': 'agent-message', 'id': item.get('id'), 'text': item['text'],
                        'final': item.get('phase') == 'final_answer'})
+            if item.get('phase') == 'final_answer':
+                self.speak_result(item['text'])
 
     def on_request(self, request_id, method, params):
         if self.phone and self.phone.request(request_id, method, params):
@@ -2687,10 +2643,7 @@ class VoiceAgent:
         text = (f'The call has ended ({reason}). ' + (f"The call assistant's summary: {summary}\n" if summary else '')
                 + 'Tell the user the result in one or two sentences, in the language you speak with them, '
                 'without repeating the details.')
-        try:
-            self.server.call('thread/realtime/appendSpeech', {'threadId': self.thread_id, 'text': text}, timeout=10)
-        except Exception as error:  # noqa: BLE001
-            log('call result', error)
+        self.speak_progress(text)
 
     def call_command(self, command):
         call = self.call
@@ -3078,8 +3031,8 @@ class VoiceAgent:
             raise RuntimeError(_("The voice connection isn't ready yet"))
         self.muted = False
         self.aloud_pending = True
-        self.speak_progress('Read the following text to the user exactly as written, in its own language, adding or '
-                            'leaving out nothing, without comment:\n' + text.strip())
+        # Read as it is, heard and never shown (the coordinator's exact narration, docs/115).
+        self.phone.post('Narrate', {'text': text.strip(), 'exact': True})
 
     # ---- settings (docs/87) ----------------------------------------------------------------
     def codex_version(self):
@@ -3722,16 +3675,8 @@ def test_turn(audio_file, seconds, screen, stop_after=None, raw=False):
     data = Path(audio_file).read_bytes()
     agent.talking = True
     agent.press = int(time.time() * 1000)
-    chunk = RATE * 2 * CHUNK_MS // 1000
-    gate = PauseGate()
-    for offset in range(0, len(data), chunk):
-        send = gate.feed(data[offset:offset + chunk]) if not raw else data[offset:offset + chunk]
-        if send:
-            agent.append_audio(send)
-        time.sleep(CHUNK_MS / 1000)
+    agent.append_audio(data)
     agent.talking = False
-    log(f'test: {gate.dropped_ms} ms of pauses left out')
-    agent.append_audio(gate.finish() + bytes(RATE * 2 * END_SILENCE_MS // 1000))
     loop = GLib.MainLoop()
     GLib.timeout_add(int(seconds * 1000), loop.quit)
     if stop_after:

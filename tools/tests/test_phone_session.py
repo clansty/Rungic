@@ -21,6 +21,7 @@ def bridge(settings=None):
     obj.threads = {}
     obj.cards, obj.card_timers = {}, {}
     obj.executor, obj.shared, obj.side_slots, obj.side_home, obj.claim_touched = None, {}, {}, {}, {}
+    obj.voice = {'sessionId': '', 'phase': 'closed', 'conversation': ''}
     obj.emit = lambda event, keep=True: None
     obj.history = lambda conversation: []
     return obj

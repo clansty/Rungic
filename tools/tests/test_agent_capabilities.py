@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """The generated sections of the assistant's prompts (tools/agent_capabilities.py, docs/59): the
 capabilities (capabilities.yaml) in agent.md, and voice-common.md with them in both voice prompts
-(phone.md and realtime.md).
+(phone.md: the voice of a call and of push-to-talk, docs/115).
 The real prompts must be current, and every skill a capability names must ship with the package."""
 from pathlib import Path
 import re
@@ -54,7 +54,7 @@ def test_a_stale_section_is_found_and_rendered_in_each_voice(tmp_path):
     # Both voices: the same shared section (2026-10-05: a call is only another way to talk), each
     # with its own text around it, and the note of voice-common.md left out.
     shared = [changed[name].split(ac.VOICE_BEGIN)[1].split(ac.VOICE_END)[0] for name in ac.VOICES]
-    assert shared[0] == shared[1] and '## Shared' in shared[0] and 'a note' not in shared[0]
+    assert '## Shared' in shared[0] and 'a note' not in shared[0]
     assert '* SMS: Send SMS. When: "发短信". Sending needs the user\'s go-ahead.\n' in shared[0]
     assert changed['phone.md'].startswith('phone.md own.\n') and changed['phone.md'].endswith('phone.md tail.\n')
     for name, text in changed.items():
@@ -84,9 +84,8 @@ def test_both_voices_speak_as_the_assistant_that_operates_the_phone():
     # the executor was drawing in it. Push-to-talk's voice already had the rule; the call's lacked it.
     prompts = Path(__file__).resolve().parents[2] / 'agent/assistant/prompts'
     phone = (prompts / 'phone.md').read_text()
-    realtime = (prompts / 'realtime.md').read_text()
     assert 'Never say that you cannot use' in phone and 'only a voice assistant' in phone
-    assert 'Do not claim that you cannot perform some actions' in realtime
+    assert 'holding the talk button' in phone, 'one prompt for a call and push-to-talk (docs/115)'
 
 
 # covers: agent.instructions/E5
@@ -97,7 +96,7 @@ def test_found_in_the_acceptance_call_of_2026_10_05():
     agent = (prompts / 'agent.md').read_text()
     assert 'make it in that app with the app\'s own tools' in agent
     assert 'Do not name files you read, skills, tools or commands.' in agent
-    for voice in ('phone.md', 'realtime.md'):
+    for voice in ('phone.md',):
         text = (prompts / voice).read_text()
         assert 'Do not tell the user steps to take for it' in text, voice
         assert 'Do not mention files that execution read, skills, tools or commands.' in text, voice
@@ -115,6 +114,6 @@ def test_the_user_says_whether_after_or_beside():
 def test_a_result_or_question_of_execution_is_no_request():
     # 2026-10-06: the voice took the agent's closing question for a request and started a new task.
     prompts = Path(__file__).resolve().parents[2] / 'agent/assistant/prompts'
-    for voice in ('phone.md', 'realtime.md'):
+    for voice in ('phone.md',):
         text = (prompts / voice).read_text()
         assert 'is not a request from the user' in text and 'wait for the answer' in text, voice

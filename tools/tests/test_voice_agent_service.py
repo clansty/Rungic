@@ -29,6 +29,7 @@ for _path in (ROOT / 'agent/assistant', ROOT / 'agent/computer-use'):
 from rungic_cua import activity, keys  # noqa: E402  (this tree's, before the service adds /usr/lib's)
 import rungic_voice_agent as v  # noqa: E402
 import task_state  # noqa: E402
+import phone_session  # noqa: E402
 import contracts  # noqa: E402
 from gi.repository import GLib, Gst  # noqa: E402
 
@@ -147,10 +148,6 @@ class Codex:
             return {'model': params.get('model'), 'reasoningEffort': params['config'].get('model_reasoning_effort')}
         if method == 'model/list':
             return {'data': MODELS}
-        if method == 'thread/realtime/start':
-            threading.Timer(0.01, self.on_notification,
-                            args=('thread/realtime/started', {'threadId': params['threadId']})).start()
-            return {}
         if method == 'account/read':
             return {'account': self.account}
         return {}
@@ -164,9 +161,65 @@ class Codex:
     def of(self, method):
         return [p for m, p in list(self.calls) if m == method]
 
-    def audio(self, thread):
-        return b''.join(base64.b64decode(p['audio']['data']) for p in self.of('thread/realtime/appendAudio')
-                        if p['threadId'] == thread)
+
+
+class Coordinator:
+    """The voice's coordinator (agent/assistant/session) as VoiceAgent drives it (docs/115): push-to-talk
+    in press mode. Records commands; its state, replies and transcripts come back as its events
+    (Service.voice)."""
+    made = []
+
+    def __init__(self, server, settings, emit, foreground, prompt, language, history=None, executor=None):
+        self.emit, self.calls, self.threads = emit, [], {}
+        self.snapshot = {'sessionId': '', 'phase': 'closed', 'tasks': [], 'conversation': ''}
+        self.voice = {'sessionId': '', 'phase': 'closed', 'conversation': ''}
+        Coordinator.made.append(self)
+
+    def alive(self):
+        return True
+
+    def start(self, conversation, mode='call', instructions=None):
+        self.calls.append(('start', {'conversation': conversation, 'mode': mode, 'instructions': instructions}))
+        self.voice.update(sessionId=f'voice-{len(self.calls)}', phase='connected', conversation=conversation)
+        threading.Timer(0.01, self.emit, args=({'type': 'voice-state', **self.voice, 'mode': mode}, False)).start()
+        return {'sessionId': self.voice['sessionId']}
+
+    def command(self, method, args=None, timeout=30):
+        self.calls.append((method, dict(args or {})))
+        if method == 'StopPhoneMode' and (args or {}).get('sessionId') == self.voice['sessionId']:
+            self.voice.update(sessionId='', phase='closed')
+            self.emit({'type': 'voice-state', **self.voice, 'mode': 'press'}, False)
+        return {}
+
+    def post(self, method, args=None):
+        self.calls.append((method, dict(args or {}, conversation=self.voice['conversation'])))
+
+    def notification(self, method, params):
+        return False
+
+    def request(self, rid, method, params):
+        return False
+
+    def work_of(self, thread):
+        return None
+
+    def of(self, method):
+        return [a for m, a in list(self.calls) if m == method]
+
+    def audio(self, conversation):
+        """All push-to-talk audio sent in `conversation`."""
+        return b''.join(base64.b64decode(a['pcm']) for a in self.of('PressAudio') if a['conversation'] == conversation)
+
+    def press(self):
+        """The last press: [its audio], committed or cancelled or None."""
+        calls = list(self.calls)
+        starts = [i for i, (m, _) in enumerate(calls) if m == 'PressStart']
+        if not starts:
+            return b'', None
+        start = starts[-1]
+        audio = b''.join(base64.b64decode(a['pcm']) for m, a in calls[start:] if m == 'PressAudio')
+        end = next((m for m, _ in calls[start:] if m in ('PressCommit', 'PressCancel')), None)
+        return audio, end
 
 
 class Invocation:
@@ -238,7 +291,9 @@ class Service:
         self.sinks = ''
         monkeypatch.setattr(v, 'subprocess', Proxy(subprocess, check_output=lambda *a, **k: self.sinks))
         monkeypatch.setattr(v.VoiceAgent, 'usage_push', lambda self, *a: None)    # the desktop's usage service
+        monkeypatch.setattr(phone_session, 'PhoneSession', Coordinator)
         Codex.started = []
+        Coordinator.made = []
         self.agent = None
 
     def make(self, key=True, codex=True):
@@ -258,6 +313,11 @@ class Service:
     @property
     def codex(self):
         return self.agent.server
+
+    @property
+    def voice(self):
+        """The coordinator push-to-talk's voice runs on (one with nothing done before it is made)."""
+        return self.agent.phone or Coordinator(None, None, lambda *a: None, None, None, None)
 
     def recorder(self):
         return next(p for p in self.pipelines if 'pulsesrc' in p.description)
@@ -286,9 +346,10 @@ class Service:
         assert invocation.error is None, invocation.error
         return invocation.result
 
-    def reply_audio(self, ms, thread='A'):
-        self.agent.on_notification('thread/realtime/outputAudio/delta', {'threadId': thread, 'audio': {
-            'data': base64.b64encode(tone(ms, 3000)).decode(), 'sampleRate': RATE}})
+    def reply_audio(self, ms, thread='A', aloud=False):
+        """The voice's reply, as the coordinator sends it (voice-audio)."""
+        self.agent.phone_emit({'type': 'voice-audio', 'data': base64.b64encode(tone(ms, 3000)).decode(),
+                               'aloud': aloud}, False)
         pump()
 
     def pushed(self):
@@ -304,11 +365,13 @@ def service(tmp_path, monkeypatch):
     pump()
 
 
-def uploaded_after_release(s, thread, before=0):
-    """The press's audio as it reached the realtime session, once all of it (the end silence too) is up."""
-    end = bytes(RATE * 2 * v.END_SILENCE_MS // 1000)
-    wait_until(lambda: s.codex.audio(thread)[before:].endswith(end), what='the press uploaded')
-    return s.codex.audio(thread)[before:]
+def uploaded_after_release(s, thread=None):
+    """The last press's audio as the voice got it, once it is committed (docs/115: sent while held)."""
+    wait_until(lambda: s.voice.of('PressStart') and s.voice.press()[1] == 'PressCommit', what='the press committed')
+    audio, _end = s.voice.press()
+    if thread is not None:
+        assert s.voice.of('PressCommit')[-1]['conversation'] == thread
+    return audio
 
 
 # ---- one press, one message (agent.voice/E1, E2) -------------------------------------------------
@@ -327,17 +390,18 @@ def test_one_hold_is_one_message_and_stops_the_answer(service):
     played = len(s.pushed())
     s.reply_audio(500)
     assert len(s.pushed()) == played, 'reply audio arriving while held is not played'
-    feed(agent, silence(300) + tone(1000) + silence(1600) + tone(1000))
-    pump(0.3)
-    assert s.codex.audio('A') == b'', 'nothing goes up while the button is held'
+    said = silence(300) + tone(1000) + silence(1600) + tone(1000)
+    feed(agent, said)
+    # docs/115: the press goes up while held (the release commits it; a cancel clears it).
+    wait_until(lambda: len(s.voice.press()[0]) >= len(said) - CHUNK, what='the press sent while held')
+    assert s.voice.press()[1] is None, 'not committed while held'
+    assert s.voice.of('PressStart')[-1]['press'] == agent.press
     agent.release_talking()
     pump()
     sent = uploaded_after_release(s, 'A')
-    speech, end = sent[:-RATE * 2 * v.END_SILENCE_MS // 1000], sent[-RATE * 2 * v.END_SILENCE_MS // 1000:]
-    assert set(end) == {0}, 'the release adds the end silence for the server VAD'
-    # The server VAD ends a turn after 500 ms of silence: no pause inside the press reaches that.
-    assert longest_silence_ms(speech) < 500
-    assert sum(1 for x in samples(speech) if abs(x) == 6000) >= 1.9 * RATE, 'both parts of the sentence were sent'
+    # The press says where the sentence ends: its pauses stay as they were.
+    assert longest_silence_ms(sent) >= 1500
+    assert sum(1 for x in samples(sent) if abs(x) == 6000) >= 1.9 * RATE, 'both parts of the sentence were sent'
     started, sent_events = s.kinds('talk-started'), s.kinds('talk-sent')
     assert len(started) == len(sent_events) == 1 and started[0]['press'] == sent_events[0]['press']
     assert not s.kinds('listen-cancelled')
@@ -352,8 +416,8 @@ def test_cancelled_press_sends_nothing_and_does_not_join_the_next(service):
     agent.start_talking(None)
     feed(agent, silence(300) + tone(1200, 7777))
     s.dbus('CancelTalking')
-    pump(0.3)
-    assert s.codex.audio('A') == b'', 'a cancelled press sends nothing'
+    wait_until(lambda: s.voice.press()[1] == 'PressCancel', what='the press cleared')
+    assert not s.voice.of('PressCommit'), 'a cancelled press is never committed: the voice acts on nothing'
     assert len(s.kinds('listen-cancelled')) == 1 and not s.kinds('talk-sent')
     assert s.recorder().states[-1] == Gst.State.READY
     agent.start_talking(None)
@@ -394,8 +458,7 @@ def test_reply_audio_plays_in_order_without_loss(service):
     s.ready('A')
     parts = [tone(120 + 40 * i, 1000 + i) for i in range(12)]          # bursts, as the realtime API sends
     for part in parts:
-        s.agent.on_notification('thread/realtime/outputAudio/delta', {'threadId': 'A', 'audio': {
-            'data': base64.b64encode(part).decode(), 'sampleRate': RATE}})
+        s.agent.phone_emit({'type': 'voice-audio', 'data': base64.b64encode(part).decode()}, False)
     pump()
     assert len(s.players()) == 1, 'one stream for the whole answer'
     player = s.players()[0]
@@ -413,8 +476,6 @@ def test_stop_ends_the_task_and_the_answer_and_nothing_trails(service):
     agent = s.make()
     s.ready('A')
     agent.on_notification('turn/started', {'threadId': 'A', 'turn': {'id': 'T1'}})
-    agent.on_notification('thread/realtime/item/started',
-                          {'threadId': 'A', 'item': {'type': 'transcriptSegment', 'role': 'assistant', 'id': 'S1'}})
     s.reply_audio(3000)
     player = s.players()[-1]
     s.dbus('StopTask')
@@ -430,8 +491,7 @@ def test_stop_ends_the_task_and_the_answer_and_nothing_trails(service):
     before = len(s.pushed())
     s.reply_audio(800)                           # the rest of the cut reply still arrives
     assert len(s.pushed()) == before, 'no trailing half sentence'
-    agent.on_notification('thread/realtime/item/completed', {'threadId': 'A', 'item': {
-        'type': 'transcriptSegment', 'role': 'assistant', 'id': 'S1', 'text': 'cut'}})
+    agent.phone_emit({'type': 'message', 'role': 'assistant', 'id': 'S1', 'text': 'cut'})   # the cut reply's end
     agent.on_notification('turn/completed', {'threadId': 'A', 'turn': {'id': 'T1', 'status': 'interrupted'}})
     for _ in range(100):
         pump()
@@ -478,6 +538,32 @@ def test_the_voice_s_own_words_start_no_task(service):
     assert len(s.kinds('agent-started')) == 2
 
 
+# covers: agent.voice/E10
+def test_the_result_is_said_outside_the_conversation_and_a_question_is_asked(service):
+    # docs/115: push-to-talk's voice is the coordinator's press mode. A result is said with no tools,
+    # out of the conversation; the user's words come back as the press's message.
+    s = service
+    agent = s.make()
+    s.ready('A')
+    started = s.voice.of('start')[-1]
+    assert started['mode'] == 'press' and 'push-to-talk' in started['instructions']
+    agent.on_notification('turn/started', {'threadId': 'A', 'turn': {'id': 'T1'}})
+    agent.on_notification('item/completed', {'threadId': 'A', 'turnId': 'T1', 'item': {
+        'type': 'agentMessage', 'id': 'm1', 'phase': 'final_answer', 'text': '画好了。要再画一颗月亮来配它吗？'}})
+    pump()
+    said = s.voice.of('Narrate')[-1]
+    assert '要再画一颗月亮来配它吗？' in said['text'] and 'ask the user that question' in said['text']
+    assert said['quiet'] == 0 and not said.get('exact')
+    # The user's press, transcribed: one bubble with the press's id, in the record.
+    agent.phone_emit({'type': 'voice-delta', 'role': 'user', 'id': 'press-77', 'text': '好'}, False)
+    agent.phone_emit({'type': 'message', 'role': 'user', 'id': 'press-77', 'text': '好，画吧'})
+    pump()
+    delta = [e for e in s.kinds('delta') if e['id'] == 'press-77']
+    message = [e for e in s.kinds('message') if e['id'] == 'press-77']
+    assert delta and message and message[-1]['press'] == 77 and message[-1]['text'] == '好，画吧'
+    assert any(e.get('id') == 'press-77' for e in agent.store.history('A'))
+
+
 # ---- reading aloud and the speak switch (agent.voice/E6) -----------------------------------------
 # covers: agent.voice/E6
 def test_read_aloud_only_sounds_and_speak_off_is_silent(service):
@@ -485,15 +571,13 @@ def test_read_aloud_only_sounds_and_speak_off_is_silent(service):
     agent = s.make()
     s.ready('A')
     s.dbus('ReadAloud', 'The answer, read again.')
-    speech = s.codex.of('thread/realtime/appendSpeech')
-    assert speech and speech[-1]['threadId'] == 'A' and 'The answer, read again.' in speech[-1]['text']
+    reading = s.voice.of('Narrate')
+    assert reading and reading[-1]['exact'] is True and reading[-1]['text'] == 'The answer, read again.'
+    assert reading[-1]['conversation'] == 'A'
     history = len(agent.store.history('A'))
-    agent.on_notification('thread/realtime/item/started',
-                          {'threadId': 'A', 'item': {'type': 'transcriptSegment', 'role': 'assistant', 'id': 'R1'}})
-    agent.on_notification('thread/realtime/item/transcript/delta', {'threadId': 'A', 'itemId': 'R1', 'delta': 'The answer'})
-    s.reply_audio(600)
-    agent.on_notification('thread/realtime/item/completed', {'threadId': 'A', 'item': {
-        'type': 'transcriptSegment', 'role': 'assistant', 'id': 'R1', 'text': 'The answer, read again.'}})
+    agent.phone_emit({'type': 'voice-delta', 'role': 'assistant', 'id': 'R1', 'text': 'The answer', 'aloud': True}, False)
+    s.reply_audio(600, aloud=True)
+    agent.phone_emit({'type': 'aloud', 'id': 'R1'}, False)
     pump()
     assert s.pushed(), 'the reading is heard'
     assert not [e for e in s.events if e.get('id') == 'R1'], 'no new message, no transcript on screen'
@@ -507,13 +591,10 @@ def test_read_aloud_only_sounds_and_speak_off_is_silent(service):
     assert json.loads((v.CONFIG / 'preferences.json').read_text())['speak'] is False, 'kept across restarts'
     # "朗读" on one answer still sounds with speak off: the user asked for that one.
     s.dbus('ReadAloud', 'Another answer.')
-    agent.on_notification('thread/realtime/item/started',
-                          {'threadId': 'A', 'item': {'type': 'transcriptSegment', 'role': 'assistant', 'id': 'R2'}})
-    s.reply_audio(600)
+    s.reply_audio(600, aloud=True)
     pump()
     assert len(s.pushed()) > heard, 'a reading asked for is heard with speak off'
-    agent.on_notification('thread/realtime/item/completed', {'threadId': 'A', 'item': {
-        'type': 'transcriptSegment', 'role': 'assistant', 'id': 'R2', 'text': 'Another answer.'}})
+    agent.phone_emit({'type': 'aloud', 'id': 'R2'}, False)
     heard = len(s.pushed())
     s.reply_audio(600)
     assert len(s.pushed()) == heard, 'after the reading, replies are silent again'
@@ -546,9 +627,9 @@ def test_talk_text_and_reading_go_to_the_conversation_on_screen(service):
     s.dbus('StopTalking')
     a_audio = samples(uploaded_after_release(s, 'A'))
     assert 2222 in a_audio and 1111 not in a_audio
-    assert 2222 not in samples(s.codex.audio(assistant))
+    assert 2222 not in samples(s.voice.audio(assistant))
     s.dbus('ReadAloud', 'an answer of A')
-    assert s.codex.of('thread/realtime/appendSpeech')[-1]['threadId'] == 'A'
+    assert s.voice.of('Narrate')[-1]['conversation'] == 'A'
 
 
 # ---- what is missing is said, the rest works (agent.voice/E8) ------------------------------------
@@ -601,7 +682,7 @@ def test_released_before_speaking_listens_on_and_sends_or_gives_up(service):
     sent = uploaded_after_release(s, assistant)
     assert len(s.kinds('talk-sent')) == 1 and len(sent) > RATE * 2
     # Nothing said: 8 seconds on, it gives up and sends nothing.
-    before = len(s.codex.audio(assistant))
+    commits = len(s.voice.of('PressCommit'))
     s.dbus('AssistantTalk', 'WL-0')
     wait_until(lambda: agent.talking, what='the second press')
     feed(agent, silence(300))
@@ -611,8 +692,8 @@ def test_released_before_speaking_listens_on_and_sends_or_gives_up(service):
     pump()
     assert not agent.talking and len(s.kinds('listen-cancelled')) == 1
     assert s.recorder().states[-1] == Gst.State.READY
-    pump(0.3)
-    assert len(s.codex.audio(assistant)) == before, 'nothing sent'
+    wait_until(lambda: s.voice.press()[1] == 'PressCancel', what='the press cleared')
+    assert len(s.voice.of('PressCommit')) == commits, 'nothing sent'
 
 
 # ---- dismissing the overlay: the service's side (agent.home-hold/E3) ------------------------------
@@ -631,8 +712,8 @@ def test_dismissed_overlay_drops_the_sentence_and_the_sound_but_not_the_work(ser
     wait_until(lambda: agent.talking)
     feed(agent, silence(300) + tone(700))
     s.dbus('CancelTalking')                      # dismissed while listening
-    pump(0.3)
-    assert s.codex.audio(assistant) == b'', 'the sentence being heard is dropped'
+    wait_until(lambda: s.voice.press()[1] == 'PressCancel', what='the press cleared')
+    assert not s.voice.of('PressCommit'), 'the sentence being heard is dropped'
     assert not s.codex.of('turn/interrupt') and agent.agent_busy, 'the agent keeps working'
     opened = len([st for st in s.recorder().states if st == Gst.State.PLAYING])
     agent.on_notification('turn/completed', {'threadId': assistant, 'turn': {'id': 'T9', 'status': 'completed'}})
@@ -770,14 +851,15 @@ def test_edited_instructions_reach_the_open_conversation_when_idle(service):
     agent.idle_check()
     wait_until(lambda: len(injected()) > first + 1, what='the skill note')
     assert 'skill has changed' in injected()[-1]['items'][0]['content'][0]['text']
-    # realtime.md edited: the voice's session restarts with it, when idle.
-    starts = len(s.codex.of('thread/realtime/start'))
-    (v.USER_PROMPTS / 'realtime.md').write_text('Speak softly.\n')
+    # The voice's prompt (phone.md) edited: its session restarts with it, when idle.
+    starts = len(s.voice.of('start'))
+    (v.USER_PROMPTS / 'phone.md').write_text('Speak softly.\n')
     agent.last_activity = time.monotonic() - 11
     agent.idle_check()
-    wait_until(lambda: len(s.codex.of('thread/realtime/start')) > starts, what='the voice restarted')
-    assert s.codex.of('thread/realtime/stop')
-    assert s.codex.of('thread/realtime/start')[-1]['prompt'].startswith('Speak softly.')
+    wait_until(lambda: len(s.voice.of('start')) > starts, what='the voice restarted')
+    assert s.voice.of('StopPhoneMode')
+    started = s.voice.of('start')[-1]
+    assert started['mode'] == 'press' and started['instructions'].startswith('Speak softly.')
 
 
 # ---- an update restarts Codex only when nobody needs it (agent.codex-install/E3) ------------------

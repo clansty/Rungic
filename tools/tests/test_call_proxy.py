@@ -353,11 +353,11 @@ class QuietDuringCallTest(unittest.TestCase):
         a.thread_id = 'origin'
         a.realtime_ready = Mock(wait=Mock(return_value=True))
         self.namespace['time'] = types.SimpleNamespace(sleep=lambda s: None, monotonic=time.monotonic, time=time.time)
+        spoken = []
+        a.speak_progress = spoken.append       # the voice says it (the coordinator's Narrate, docs/115)
         a.speak_call_result('hung up', '对方同意周六晚上七点。')
-        method, params = a.server.call.call_args.args
-        self.assertEqual(method, 'thread/realtime/appendSpeech')
-        self.assertIn('one or two sentences', params['text'])
-        self.assertIn('对方同意周六晚上七点', params['text'])
+        self.assertIn('one or two sentences', spoken[-1])
+        self.assertIn('对方同意周六晚上七点', spoken[-1])
 
     # covers: agent.call-proxy/E4 agent.call-proxy/E6
     def test_assistant_pauses_while_the_user_talks_and_comes_back_after(self):

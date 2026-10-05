@@ -136,3 +136,4 @@
 - {path: docs/109-dev-release-channel.md, kind: reference, note: dev 发布渠道（只从 origin/main 出、含 APK、发布包、多机部署与状态、GitHub 预发布）与发布包不被 Ubuntu 更新替换的分析}
 - {path: docs/113-independent-linux-services.md, kind: journal, note: Linux 用户服务与可替换硬件后端的生命周期边界、Android 16 root 探针和待验范围}
 - {path: docs/114-task-control.md, kind: journal, note: 随时介入正在做的任务：存盘的指令收件箱、带确认的停止、导播台接手与交还、重启后接着做}
+- {path: docs/115-push-to-talk-coordinator.md, kind: journal, note: 按住说话改走电话的语音协调器（press 模式）：开工只认用户的话，结果用带外回应播报}
