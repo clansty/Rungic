@@ -213,6 +213,12 @@ class TurnState:
         kind = item.get('type')
         item_id = item.get('id', '')
         if kind == 'commandExecution':
+            # Reading its own instructions (a skill, ~/.codex) is no step of the user's work: told,
+            # it came out as "I read SKILL.md" (2026-10-05).
+            if '/.codex/' in item.get('command', '') and not item.get('exitCode'):
+                paths = [str(a.get('path') or '') for a in item.get('commandActions') or [] if a.get('type') == 'read']
+                if not paths or all('/.codex/' in p for p in paths):
+                    return False
             text, activity = describe_command(item.get('command', ''), item.get('commandActions')), 'command'
         elif kind == 'fileChange':
             text, files = describe_files(item.get('changes'))

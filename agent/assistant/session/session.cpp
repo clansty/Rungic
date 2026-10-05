@@ -122,7 +122,10 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
     // Progress for the voice to say, from the same progress rules as push-to-talk's
     // (VoiceAgent.progress_tick): one sentence, told as the instruction says.
     else if(method=="Narrate"){
-        if(configured&&!id.isEmpty()&&!localSpeech&&!narrationSuppressed)requestReply({args["text"].toString(),{},generation,true},"Say one short sentence to the user, as the message asks. Do not start, steer or stop any task.");
+        // Not over the voice's own words: an update waits for 12 s of quiet after it spoke (the
+        // updates came every few seconds over its acknowledgements, 2026-10-05).
+        const bool quiet=!responseActive&&playback.pending.isEmpty()&&clock.elapsed()-lastPlaybackPush>12000;
+        if(configured&&!id.isEmpty()&&!localSpeech&&!narrationSuppressed&&quiet)requestReply({args["text"].toString(),{},generation,true},"Say one short sentence to the user, as the message asks. Do not start, steer or stop any task.");
         done({{"ok",true}});
     }
     else if(method=="ExternalBusy"){externalBusy=args["busy"].toBool();if(!externalBusy)runQueue();done({{"ok",true}});}
@@ -320,7 +323,7 @@ void Session::tick(){
     }
     if(configured&&!narrationSuppressed&&!responseActive&&expected.isEmpty()&&!localSpeech&&playback.pending.isEmpty()&&now-lastPlaybackPush>300&&!acknowledgements.isEmpty()){
         const auto c=acknowledgements.takeLast();acknowledgements.clear();
-        if(c.generation==generation)requestReply({c.text,c.utterance,generation,true},"Acknowledge the actual tool result accurately in one short sentence. Do not call tools.");
+        if(c.generation==generation)requestReply({c.text,c.utterance,generation,true},"Acknowledge the actual tool result accurately in one short sentence: say that you do it. Do not ask the user anything that the tool result does not ask. Do not call tools.");
     }
     if(configured&&!responseActive&&expected.isEmpty()&&!localSpeech&&!deferred.isEmpty()&&(!deferred.last().progress||(playback.pending.isEmpty()&&now-lastPlaybackPush>300))){
         auto c=deferred.takeLast();deferred.clear();if(c.generation==generation)requestReply(c,c.instruction);
@@ -335,20 +338,33 @@ void Session::requestReply(ResponseContext context,QString instruction){
     expected.append(context);state();
     send({{"type","response.create"},{"response",replyRequest(context,instruction)}});
 }
+// The language of the user's last words, named for the voice: an update outside the conversation came
+// in English and in Korean with only "the user's language" to go by (2026-10-05).
+static QString languageOf(const QString &text){
+    int han=0,kana=0,hangul=0,latin=0;
+    for(const QChar c:text){const auto u=c.unicode();
+        if(u>=0x4E00&&u<=0x9FFF)++han;else if(u>=0x3040&&u<=0x30FF)++kana;else if(u>=0xAC00&&u<=0xD7AF)++hangul;else if(c.isLetter()&&u<0x250)++latin;}
+    if(hangul>0&&hangul>=han)return "Korean";
+    if(kana>0)return "Japanese";
+    if(han>0)return "Chinese";
+    if(latin>0)return "the language of these words";
+    return {};
+}
 QJsonObject Session::replyRequest(const ResponseContext &context,const QString &instruction) const{
     QJsonObject response;
+    const auto language=languageOf(lastUserText);
     if(context.progress){
         response["tool_choice"]="none";
         // A response's instructions replace the session's: the rules stay with it (one assistant, no
         // steps for the user, the user's language). Without them an acknowledgement told the user to
         // choose the TV's input, and an update came in Korean (the G100 S, 2026-10-05).
         response["instructions"]=prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))
-            +"\n\n"+instruction+"\nVerified updates:\n"+context.text;
+            +"\n\n"+instruction+(language.isEmpty()?QString():"\nSpeak "+language+", as the user does.")+"\nVerified updates:\n"+context.text;
         if(context.utterance.isEmpty()){
             // An update of its own (progress, a task's end) is spoken outside the conversation: inside
             // it, it answered a request the user had just made, with no tools ("I can't do that").
             response["conversation"]="none";
-            const QString said=lastUserText.isEmpty()?QString():"\nThe user's last words (speak their language): "+lastUserText.left(200);
+            const QString said=lastUserText.isEmpty()?QString():"\nThe user's last words (speak "+(language.isEmpty()?QString("their language"):language)+"): "+lastUserText.left(200);
             response["input"]=QJsonArray{QJsonObject{{"type","message"},{"role","user"},{"content",QJsonArray{QJsonObject{{"type","input_text"},{"text","Give this update to the user now."+said}}}}}};
         }
     }

@@ -216,6 +216,7 @@ int main(int argc,char **argv){
         check(update["instructions"].toString().startsWith("RULES:")&&update["conversation"]=="none","an update keeps the rules and stays outside the conversation");
         check(update["input"].toArray()[0].toObject()["content"].toArray()[0].toObject()["text"].toString().contains("给这个画配一段背景音乐"),"in the user's language");
         check(r.replyRequest({"draw it","utt-2",1,false},"").isEmpty(),"an answer to the user is the session's own");
+        check(ack["instructions"].toString().contains("Speak Chinese"),"the user's language named (an update came in English and in Korean)");
     }
     // covers: agent.phone-mode/E14 agent.phone-mode/E15
     // The app's call bar and its summary (docs/101): the state says when the call began and when the

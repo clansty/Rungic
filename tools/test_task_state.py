@@ -128,3 +128,16 @@ def test_a_chinese_desktop_reads_as_before(monkeypatch):
     state.on_patch('f1', [{'path': '/h/x.py', 'kind': {'type': 'update'}, 'diff': '+a\n+b\n-c\n'}])
     assert state.snapshot(now=2)['current']['text'] == '修改 x.py'
     assert state.snapshot(now=2)['current']['detail'] == '+2 −1 行'
+
+
+# covers: agent.progress/E2
+def test_reading_its_own_instructions_is_no_step():
+    # 2026-10-05: reading a skill came out to the user as "I read SKILL.md".
+    t = ts.TurnState(now=0)
+    read = {'type': 'commandExecution', 'id': 'c1', 'command': "/bin/bash -lc 'cat /home/u/.codex/skills/rungic-phone-desktop/SKILL.md'",
+            'commandActions': [{'type': 'read', 'name': 'SKILL.md', 'path': '/home/u/.codex/skills/rungic-phone-desktop/SKILL.md'}]}
+    assert t.on_item(read, False, now=1) is False and t.on_item({**read, 'exitCode': 0}, True, now=2) is False
+    assert t.current is None and t.recent == []
+    work = {'type': 'commandExecution', 'id': 'c2', 'command': "/bin/bash -lc 'cat ~/Pictures/notes.txt'",
+            'commandActions': [{'type': 'read', 'name': 'notes.txt', 'path': '/home/u/Pictures/notes.txt'}]}
+    assert t.on_item(work, False, now=3) is True, "the user's own files are their work"
