@@ -940,7 +940,7 @@ APK 进程提供：`platform.sock`、`capture.sock`、`codec.sock`、`wayland-0`
 - 推测（未证实）：用户当时在触控板全屏，同时有两路 0 号录屏，带指针的一路盖在不带指针的一路上，两路各自出帧。Firefox 只重画局部时，两路之间短暂不一致，看起来像闪；其他程序整块重画，不明显。§20 之后不带指针的那一路暂停，只剩一路。其他可能：手机 KWin 不再在全屏下面合成造成的时序变化，或者重启本身。
 - 如果再出现：先查触控板模式下的两路画面（临时恢复两路并存做对照），再按上面的实验录原始画面和手机屏幕逐帧比较。
 
-### 19.12 手机和工作区的 Firefox 各用一份配置文件（2026-10-05，用户批准方案 1、2，已实现，待实机验证）
+### 19.12 手机和工作区的 Firefox 各用一份配置文件（2026-10-05，用户批准方案 1、2，已实现，G100 S 实测通过）
 
 - **现象**（用户反馈）：Codex 任务在工作区里打开浏览器后，再从手机的应用抽屉点 Firefox，提示 Firefox 已在运行、没有响应，打不开。
 - **原因**：
@@ -952,12 +952,18 @@ APK 进程提供：`platform.sock`、`capture.sock`、`codec.sock`、`wayland-0`
 - **对照**：Grok Bot 一个账号只有一台云端电脑，所有 Bot 共享浏览器配置和登录，官方说明不按 Bot 隔离；有用户报告每个 Agent 的浏览器窗口仍要单独登录。技术细节没有公开。
 - **方案**（用户批准 1、2；不采用「提示被占用、一键收回」，要保证两边任何时候都能打开）：
   1. 各用一份配置文件：0 号不再链接 `mozilla`（rungic-desktop-dirs 的私有项，已有的链接在下次启动时去掉）。在工作区里，`/usr/bin/firefox` 发现 `RUNGIC_WORKSPACE` 非空且调用方没有指定配置文件时，用 `--profile ~/.local/state/rungic-workspaces/<N>/firefox`（按工作区编号定位置：经 `rungic-workspace-env` 启动的程序沿用调用方的 `XDG_CONFIG_HOME`，也就是用户的；第一次实机测试时配置文件因此建到了用户的 mozilla 目录里）。
-  2. 登录状态单向复制：启动前由 `/usr/libexec/rungic-firefox-workspace-profile` 从用户的默认配置文件（`installs.ini` 的默认项，否则 `Default=1`）复制 `cookies.sqlite`、`key4.db`、`cert9.db` 和 `logins.json`、`cert_override.txt`。数据库先连同预写日志按文件原样复制，再单独打开副本检查、存进配置文件；中途被写坏的副本检查不过就重取，最多三次。不直接对用户的数据库用 SQLite 备份接口：用户的 Firefox 运行时锁着 `cookies.sqlite`，第一次实机测试时备份一直等这把锁，Firefox 启动不了。工作区的 Firefox 正在运行时（`.parentlock` 被锁）不动。复制失败只在 stderr 记一行，Firefox 照常启动。Agent 在工作区里新登录的不写回用户的配置文件，下一次启动又从用户的重新复制。
+  2. 登录状态单向复制：启动前由 `/usr/libexec/rungic-firefox-workspace-profile` 从用户的默认配置文件（`installs.ini` 的默认项，否则 `Default=1`）复制 `cookies.sqlite`、`key4.db`、`cert9.db`、`logins.db`（Firefox 156 的密码库）和 `logins.json`、`cert_override.txt`、`prefs.js`（用户的设置和已接受的使用条款，否则新配置文件一启动就是首次运行对话框）。数据库先连同预写日志按文件原样复制，再单独打开副本检查、存进配置文件；中途被写坏的副本检查不过就重取，最多三次。不直接对用户的数据库用 SQLite 备份接口：用户的 Firefox 运行时锁着 `cookies.sqlite`，第一次实机测试时备份一直等这把锁，Firefox 启动不了。工作区的 Firefox 正在运行时（`.parentlock` 被锁）不动。复制失败只在 stderr 记一行，Firefox 照常启动。Agent 在工作区里新登录的不写回用户的配置文件，下一次启动又从用户的重新复制。
   3. Firefox 从 `switch.py` 的单实例名单里去掉：Agent 打开 Firefox 时不再先关掉用户的。
 - **代价**：
   - 用户在 `about:config` 里的设置不再带到工作区。
   - Agent 的 Firefox 开着时，用户在手机上新登录的网站，要等它下次启动才带过去。
   - Agent 拿到用户的 cookie，等于能以用户身份访问网站；共享配置文件时本来就是这样，现在变成明确的复制。
+- **实机（G100 S，开发覆盖，2026-10-05）**：
+  - 手机上的 Firefox 开着，同时在 1 号工作区启动 Firefox：两个进程同时运行，工作区的带 `--profile ~/.local/state/rungic-workspaces/1/firefox`，用户的 mozilla 目录没有多出东西。
+  - 工作区里再次启动 Firefox，新页面开在已运行的那个里（同一工作区内的单实例转交正常）。
+  - 用户的 52 个 cookie 都复制过去；工作区里打开 bilibili 是登录状态（头像、消息数），没有首次运行的条款对话框。
+  - 第一次实测暴露的问题都已修正：配置文件位置随了用户的 `XDG_CONFIG_HOME`；对用户正在用的 `cookies.sqlite` 做 SQLite 备份一直等锁；Firefox 156 的密码在 `logins.db`；新配置文件弹出首次运行对话框（现在连 `prefs.js` 一起复制）。
+  - 测试后关掉了工作区的 Firefox、停掉了 1 号工作区，删除了截图。
 - **离线测试**：`tools/tests/test_firefox_workspace_profile.py`（复制内容、正在运行时不动、失败不拦启动、包装脚本只在工作区加配置文件）、`tools/tests/test_desktop_dirs.py`（0 号不再链接 mozilla，旧链接被去掉）、`tools/test_switch.py`。
 
 ## 20. 浮窗在后台省电：全屏不透明、少画无用的帧（2026-10-03，用户批准第 1、2 项，已部署实测）

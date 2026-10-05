@@ -969,13 +969,13 @@ Linux 应用用手机的相机拍照录像，用手机的扬声器和麦克风�
 - **E4** WebRender 和 WebGL 1/2 在 FD710 上运行，浏览器内容沙箱保持开启。（缺口：Firefox 156 上 WebRender、WebGL 1/2 与内容沙箱没有当前版本的检查记录（research/30 的结果是 Phosh 时期的 Firefox 154）。要在手机的 FD710 上看，系统测试镜像也没有 Firefox）
 - **E5** 网站经正常授权使用 PipeWire 摄像头和麦克风，同步录制。（缺口：40 篇（2026-09-23）记有浏览器前后摄、麦克风采集通过，没有记音画同步的录制。要手机的真实摄像头和麦克风，本轮不碰手机）
 - **E6** 浏览器按系统代理联网，界面是中文。（缺口：40 篇记有 Firefox 156 的中文界面，按系统代理联网只有 Phosh 时期的记录（research/30）。系统测试镜像没有 Firefox，要在手机上核对）
-- **E7** 手机上和 Agent 的工作区（包括独立桌面）里的 Firefox 任何时候都能各自打开，互不报「已在运行」；工作区里的 Firefox 启动时带上用户的登录状态（cookie、保存的密码和证书例外），Agent 在那里新登录的不写回用户的配置。（单元测试）
+- **E7** 手机上和 Agent 的工作区（包括独立桌面）里的 Firefox 任何时候都能各自打开，互不报「已在运行」；工作区里的 Firefox 启动时带上用户的登录状态（cookie、保存的密码和证书例外），Agent 在那里新登录的不写回用户的配置。（单元测试、人工）
 
 注意：
 - 自动化把 focusmanager.testmode=true 留在日常 profile，会让 Firefox 在输入法提交时空指针崩溃。自动化只用独立测试 profile，验收后要核对日常 profile 里没有测试偏好。 [docs/36-firefox-input-fix.md](../docs/36-firefox-input-fix.md)
 - KGSL 没有 DRM 节点，Firefox 会误判软件显卡。策略里把 gfx.webrender.all 设为可更改的默认 true。 [docs/research/74-vaapi-feasibility.md](../docs/research/74-vaapi-feasibility.md)
 - 用 RUNGIC_WORKSPACE 判断桌面，不能用 PLASMA_PLATFORM（它会由 startplasma 串进工作区的 systemd 环境）。一个 Firefox 配置文件只能在一个会话里运行，第二个会话的 Firefox 也够不着第一个（另一个显示和会话总线），只报「已在运行」；所以工作区用自己的配置文件（/usr/bin/firefox 的 --profile，按工作区编号放在 ~/.local/state/rungic-workspaces/<N>/firefox；经 rungic-workspace-env 启动的程序带着用户的 XDG_CONFIG_HOME），独立桌面不再链接用户的 mozilla 目录（rungic-desktop-dirs）。 [docs/research/97-headless-agent-work.md](../docs/research/97-headless-agent-work.md)
-- 工作区的配置文件每次启动前从用户的复制 cookie、key4.db、logins.json、cert9.db 和证书例外，正在运行时不动；复制失败只记一行，不拦 Firefox。用户的 Firefox 运行时锁着 cookies.sqlite，对它直接用 SQLite 备份会一直等锁：先按文件复制再检查副本。用户在 about:config 里改的设置不再带到工作区；网站记在 cookie 里的移动版可能还会跳。 [docs/research/97-headless-agent-work.md](../docs/research/97-headless-agent-work.md)
+- 工作区的配置文件每次启动前从用户的复制 cookie、key4.db、logins.db（Firefox 156 的密码库）、cert9.db、证书例外和 prefs.js（没有它新配置文件会弹首次运行对话框），正在运行时不动；复制失败只记一行，不拦 Firefox。用户的 Firefox 运行时锁着 cookies.sqlite，对它直接用 SQLite 备份会一直等锁：先按文件复制再检查副本。用户在 about:config 里改的设置不再带到工作区；网站记在 cookie 里的移动版可能还会跳。 [docs/research/97-headless-agent-work.md](../docs/research/97-headless-agent-work.md)
 - Firefox 156 的 WebRender 在 Linux 上只有 OpenGL 和软件路径，没有 Vulkan 合成选项。 [docs/56-kwin-vulkan-quantification.md](../docs/56-kwin-vulkan-quantification.md)
 
 文档：[docs/36-firefox-input-fix.md](../docs/36-firefox-input-fix.md)
