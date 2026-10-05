@@ -851,7 +851,7 @@ features:
     scenario: agent.desktop-work
     status: live
     platform: linux
-    summary: 支持多实例的应用在工作区内启动新实例。微信、浏览器等单实例应用需要借用用户的实例。Agent 先征得用户同意，使用结束后自动归还。
+    summary: 支持多实例的应用在工作区内启动新实例。微信、Chromium 等单实例应用需要借用用户的实例。Agent 先征得用户同意，使用结束后自动归还。Firefox 不再借用：工作区有自己的配置文件和用户登录状态的副本，两边都能直接打开（apps.firefox/E7）。
     experience:
       - id: E1
         text: 关闭用户正在运行的那一份之前必须先征得同意：工具返回 needs_confirmation 和要问的话，只有带上 switch 才关闭。

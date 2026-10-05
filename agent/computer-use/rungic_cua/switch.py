@@ -2,7 +2,7 @@
 
 The agent works in a workspace of its own. Most apps simply start a second instance there
 (its own session bus: KDE's single-instance handling stays within it). A few cannot: one
-instance per profile or login (WeChat, Firefox and Chromium profiles, Telegram ...); a second
+instance per profile or login (WeChat, Chromium profiles, Telegram ...); a second
 one fails on the profile lock or hands its request to the first, on the user's phone. Those are
 switched: closed in the user's session - only after the user agreed (the tool refuses without
 it) and never during a call - reopened in the workspace, and given back to the user's session
@@ -24,7 +24,9 @@ USER_VALUES = ('PLASMA_INTEGRATION_USE_PORTAL', 'QT_QPA_PLATFORMTHEME')
 
 
 # Program names (the executable's base name) of apps with one instance per user's data.
-SINGLE_INSTANCE = {'wechat', 'firefox', 'firefox-esr', 'chromium', 'chromium-browser', 'google-chrome',
+# Firefox is not one of them any more: in a workspace it has a profile of its own with a copy of the
+# user's sign-ins (/usr/bin/firefox), and both always open (the user, 2026-10-05).
+SINGLE_INSTANCE = {'wechat', 'chromium', 'chromium-browser', 'google-chrome',
                    'google-chrome-stable', 'telegram-desktop', 'telegram', 'thunderbird', 'signal-desktop'}
 RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}')
 STATE = RUNTIME / 'rungic-workspace-switched.json'

@@ -91,3 +91,22 @@ def test_rebuilding_keeps_the_private_files(tmp_path, monkeypatch):
     d.build(state)
     assert (state / 'config/kwinrc').read_text() == '[Desktop]\n'
     assert (state / 'config/kdeglobals').is_symlink()
+
+
+# covers: apps.firefox/E7
+def test_firefox_profiles_are_the_desktops_own(tmp_path, monkeypatch):
+    d = load(tmp_path, monkeypatch)
+    state = setup(tmp_path)
+    (tmp_path / 'config/mozilla/firefox/abc.default-release').mkdir(parents=True)
+    # A desktop set up before (2026-10-05) linked the user's; build drops that link.
+    (state / 'config').mkdir(parents=True)
+    (state / 'config/mozilla').symlink_to(tmp_path / 'config/mozilla')
+    d.build(state)
+    assert not os.path.lexists(state / 'config/mozilla')
+    # The desktop's Firefox makes its own; watch leaves it there, and does not link the user's.
+    (state / 'config/mozilla/firefox/rungic-workspace').mkdir(parents=True)
+    os.utime(state / 'config/mozilla', (time.time() - 60, time.time() - 60))
+    d.step(state)
+    assert not (state / 'config/mozilla').is_symlink()
+    assert (tmp_path / 'config/mozilla/firefox/abc.default-release').is_dir()
+    assert not (tmp_path / 'config/mozilla/firefox/rungic-workspace').exists()

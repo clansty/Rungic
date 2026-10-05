@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""firefox-workspace-profile DIR: an agent workspace's own Firefox profile, with the user's logins.
+
+An agent workspace (docs/research/91) is another session of the same user, on another display and
+session bus: a Firefox there cannot share the user's profile with the phone's Firefox (one process
+per profile; the second could not even reach the first to hand it a window, and failed with
+"already running"). The workspace has its own profile, DIR (the firefox wrapper passes it), and
+before its Firefox starts it gets a copy of what keeps the user signed in: cookies, saved logins and
+their key, certificates and their exceptions. One way, the user's are kept: what the agent signs in
+to stays in the workspace, and the next start begins again from the user's.
+
+Nothing here may keep Firefox from starting: a file that cannot be copied is left as it was, with a
+line on stderr. A running Firefox on DIR is left alone (its files are in use).
+"""
+import configparser
+import fcntl
+import os
+import shutil
+import sqlite3
+import sys
+from pathlib import Path
+
+# SQLite databases are copied with SQLite's backup (consistent while the user's Firefox writes);
+# the rest as files (Firefox replaces logins.json whole).
+DATABASES = ('cookies.sqlite', 'key4.db', 'cert9.db')
+FILES = ('logins.json', 'cert_override.txt')
+
+
+def user_profile(home: Path, config: Path) -> Path | None:
+    """The user's default Firefox profile: the install's default, else the profile marked default."""
+    for root in (home / '.mozilla/firefox', config / 'mozilla/firefox'):
+        if not (root / 'profiles.ini').is_file():
+            continue
+        def read(name):
+            parsed = configparser.ConfigParser(interpolation=None)
+            parsed.optionxform = str
+            if (root / name).is_file():
+                parsed.read(root / name)
+            return parsed
+        installs, ini = read('installs.ini'), read('profiles.ini')
+        # installs.ini's sections are install hashes; profiles.ini names them [Install<hash>].
+        paths = [installs[s]['Default'] for s in installs.sections() if installs[s].get('Default')]
+        paths += [ini[s]['Default'] for s in ini.sections() if s.startswith('Install') and ini[s].get('Default')]
+        for section in ini.sections():
+            if section.startswith('Profile') and ini[section].get('Default') == '1' and ini[section].get('Path'):
+                relative = ini[section].get('IsRelative', '1') == '1'
+                paths.append(ini[section]['Path'] if relative else str(Path(ini[section]['Path'])))
+        for path in paths:
+            profile = root / path if not os.path.isabs(path) else Path(path)
+            if profile.is_dir():
+                return profile
+    return None
+
+
+def running(profile: Path) -> bool:
+    """Whether a Firefox holds the profile (its .parentlock is locked while it runs)."""
+    lock = profile / '.parentlock'
+    if not lock.exists():
+        return False
+    try:
+        with open(lock, 'rb+') as file:
+            fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.lockf(file, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+
+
+def copy_database(source: Path, target: Path) -> None:
+    part = target.with_name(target.name + '.rungic-part')
+    part.unlink(missing_ok=True)
+    src = sqlite3.connect(f'file:{source}?mode=ro', uri=True, timeout=2)
+    try:
+        dst = sqlite3.connect(part)
+        try:
+            src.backup(dst)
+            if dst.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise sqlite3.DatabaseError('copy failed its check')
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    for suffix in ('-wal', '-shm', '-journal'):
+        Path(str(target) + suffix).unlink(missing_ok=True)
+    os.replace(part, target)
+
+
+def seed(profile: Path, user: Path) -> list[str]:
+    """Copy the user's sign-in state into `profile` -> what could not be copied."""
+    failed = []
+    profile.mkdir(parents=True, exist_ok=True)
+    for name in DATABASES:
+        if (user / name).is_file():
+            try:
+                copy_database(user / name, profile / name)
+            except (sqlite3.Error, OSError) as error:
+                failed.append(f'{name}: {error}')
+                (profile / (name + '.rungic-part')).unlink(missing_ok=True)
+    for name in FILES:
+        if (user / name).is_file():
+            try:
+                shutil.copy2(user / name, profile / (name + '.rungic-part'))
+                os.replace(profile / (name + '.rungic-part'), profile / name)
+            except OSError as error:
+                failed.append(f'{name}: {error}')
+    return failed
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    profile = Path(sys.argv[1])
+    home = Path.home()
+    config = Path(os.environ.get('RUNGIC_USER_CONFIG_HOME') or home / '.config')
+    user = user_profile(home, config)
+    if user is None or user.resolve() == profile.resolve():
+        return 0
+    if running(profile):
+        return 0
+    for line in seed(profile, user):
+        print(f'firefox-workspace-profile: {line}', file=sys.stderr)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as error:  # noqa: BLE001 - Firefox starts regardless
+        print(f'firefox-workspace-profile: {error}', file=sys.stderr)
+        sys.exit(0)

@@ -1,5 +1,6 @@
 # rungic-firefox
 install -Dm755 "$SRC/desktop/firefox" "$DESTDIR/usr/bin/firefox"
+install -Dm755 "$SRC/desktop/firefox-workspace-profile" "$DESTDIR/usr/libexec/rungic-firefox-workspace-profile"
 # Install the same runtime subset as before, directly from the patched upstream source.
 # Its Makefile also adds metainfo and policies; Rungic maintains its own policies below.
 task_mcf="$SRC/upstream/mobile-config-firefox/src"

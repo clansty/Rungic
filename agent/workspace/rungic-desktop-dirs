@@ -10,7 +10,8 @@ the same files, but for PRIVATE ones, the desktop's own:
 
 - KWin's and the shell's state, whose names are fixed by their programs (kwinrc, plasmashellrc,
   the desktop layout), and the session's own daemons' (global shortcuts, activities, kded);
-- the clipboard history (each session's own; their clipboards are kept in step, rungic-clipboard).
+- the clipboard history (each session's own; their clipboards are kept in step, rungic-clipboard);
+- Firefox's profiles (one runs in one session only; the desktop's gets a copy of the user's sign-ins).
 
   build   the two directories, from scratch for the shared entries
   watch   keep them in step, every few seconds: an entry the desktop created in its directory
@@ -36,6 +37,10 @@ PRIVATE = {
         'kded5rc', 'kded6rc', 'ksmserverrc',
         # The phone's own layers (XDG_CONFIG_DIRS of Plasma Mobile), not the desktop's.
         'plasma-mobile', 'kdedefaults', 'plasmamobilerc',
+        # Firefox's profiles: one profile runs in one session only, and the desktop's Firefox (another
+        # display and bus) could neither use the phone's nor reach it; it has its own, with a copy of
+        # the user's sign-ins (/usr/bin/firefox, firefox-workspace-profile).
+        'mozilla',
     },
     'data': {
         'kactivitymanagerd', 'klipper', 'kscreen',

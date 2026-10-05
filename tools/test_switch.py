@@ -52,7 +52,9 @@ def test_single_instance_by_program():
     with tempfile.TemporaryDirectory() as runtime:
         switch = load(runtime)
         assert switch.single_instance({'id': 'wechat', 'exec': '/usr/bin/wechat %U'})
-        assert switch.single_instance({'id': 'firefox', 'exec': 'firefox --new-window %u'})
+        assert switch.single_instance({'id': 'chromium', 'exec': 'chromium %U'})
+        # Firefox opens in both: a workspace has a profile of its own (/usr/bin/firefox, 2026-10-05).
+        assert not switch.single_instance({'id': 'firefox', 'exec': 'firefox --new-window %u'})
         assert not switch.single_instance({'id': 'org.kde.kalk', 'exec': 'kalk'})
         assert not switch.single_instance({'id': 'blender', 'exec': 'blender %f'})
 

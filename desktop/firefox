@@ -3,4 +3,18 @@
 export LD_LIBRARY_PATH=/usr/lib/firefox:/usr/lib/rungic-codec/ffmpeg/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export LD_PRELOAD=/usr/lib/rungic-codec/librungiccodec.so:/usr/lib/firefox/libavcodec.so.62${LD_PRELOAD:+:$LD_PRELOAD}
 export RUNGIC_CODEC_PRECONNECT=1
+# In an agent workspace (another display and session bus, docs/research/91) Firefox has a profile
+# of its own, with a copy of the user's sign-ins (firefox-workspace-profile): one profile cannot
+# run in two sessions, and the phone's Firefox and the workspace's both always open. A profile the
+# caller names is left alone.
+if [ -n "${RUNGIC_WORKSPACE:-}" ]; then
+    case " $* " in
+        *" -P "*|*" -p "*|*" --profile "*|*" -profile "*|*" --ProfileManager "*|*" -ProfileManager "*) ;;
+        *)
+            profile=${XDG_CONFIG_HOME:-$HOME/.config}/mozilla/firefox/rungic-workspace
+            /usr/libexec/rungic-firefox-workspace-profile "$profile" || true
+            set -- --profile "$profile" "$@"
+            ;;
+    esac
+fi
 exec /usr/lib/firefox/firefox "$@"
