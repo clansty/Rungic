@@ -10,6 +10,7 @@
 #include <QNetworkRequest>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QTimeZone>
 #include <QUuid>
 #include <algorithm>
 #include <signal.h>
@@ -124,7 +125,7 @@ void Session::command(QString method,QJsonObject args,std::function<void(QJsonOb
         auto *t=tasks.find(args["taskId"].toString());if(t&&!t->terminal())t->facts=args["facts"].toString().left(1200);
         // The voice's snapshot follows every 5 s at most; a task's own change sends it at once.
         if(t&&configured&&clock.elapsed()-lastFacts>5000){lastFacts=clock.elapsed();
-            send({{"type","session.update"},{"session",QJsonObject{{"type","realtime"},{"instructions",prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))}}}});}
+            send({{"type","session.update"},{"session",QJsonObject{{"type","realtime"},{"instructions",prompt+timeNote()+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))}}}});}
         done({{"ok",true}});
     }
     // Progress for the voice to say, from the same progress rules as push-to-talk's
@@ -225,7 +226,6 @@ void Session::stop(QString reason){
 }
 void Session::send(QJsonObject o){if(!connected)return;if(!o.contains("event_id"))o["event_id"]="event_"+uuid();ws.sendTextMessage(QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));}
 void Session::configure(){
-    prompt+="\nCurrent system time (UTC): "+QDateTime::currentDateTimeUtc().toString(Qt::ISODate)+". Resolve relative dates in the user's or requested location's timezone.";
     QJsonObject words{{"original_words",QJsonObject{{"type","string"},{"description","The user's original words, with negations, constraints and corrections"}}}};
     QJsonObject target=words;target["task_id"]=QJsonObject{{"type","string"},{"description","Exact taskId from the trusted task snapshot"}};
     auto start=words;start["access"]=QJsonObject{{"type","string"},{"enum",QJsonArray{"read_only","exclusive"}},{"description","read_only for research, web queries and terminal commands that only read, wait or calculate; exclusive for edits, GUI interaction, device control, external writes or uncertain effects"}};
@@ -235,8 +235,15 @@ void Session::configure(){
                       {"turn_detection",press()?QJsonValue(QJsonValue::Null):QJsonValue(QJsonObject{{"type","semantic_vad"},{"eagerness","medium"},{"create_response",false},{"interrupt_response",true}})}};
     if(QRegularExpression("^[a-z]{2}$").match(language).hasMatch()){auto t=input["transcription"].toObject();t["language"]=language;input["transcription"]=t;}
     QJsonObject out{{"format",QJsonObject{{"type","audio/pcm"},{"rate",24000}}},{"voice","marin"}};
-    QJsonObject config{{"type","realtime"},{"instructions",prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))},{"output_modalities",QJsonArray{"audio"}},{"tools",tools},{"tool_choice","auto"},{"audio",QJsonObject{{"input",input},{"output",out}}}};
+    QJsonObject config{{"type","realtime"},{"instructions",prompt+timeNote()+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))},{"output_modalities",QJsonArray{"audio"}},{"tools",tools},{"tool_choice","auto"},{"audio",QJsonObject{{"input",input},{"output",out}}}};
     send({{"type","session.update"},{"session",config}});
+}
+// The time now, with every instruction the voice gets (a session lasts; "现在几点了" was answered with
+// the UTC time of its start, 2026-10-06).
+QString Session::timeNote() const{
+    const auto now=QDateTime::currentDateTime();
+    return "\nCurrent local time: "+now.toString("yyyy-MM-dd HH:mm")+" (UTC"+now.timeZone().displayName(now,QTimeZone::OffsetName).mid(3)+", "
+        +QString::fromUtf8(now.timeZone().id())+"). Say times in this local time. Resolve relative dates in the user's or requested location's timezone.";
 }
 void Session::onSpeech(bool value){
     if(muted)return;localSpeech=value;if(value)lastVoice=clock.elapsed();if(!configured||inputBlocked)return;
@@ -297,6 +304,7 @@ void Session::incoming(QJsonObject o){
     } else if(type=="response.output_audio_transcript.done"){
         const auto response=o["response_id"].toString();
         if(responses.contains(response)&&responses[response].generation==generation){
+            if(!responses[response].utterance.isEmpty()&&!o["transcript"].toString().trimmed().isEmpty())spoken.insert(responses[response].utterance);
             if(aloud.contains(response))event({{"type","aloud"},{"id",o["item_id"]}},false);
             else event({{"type","message"},{"id",o["item_id"]},{"role","assistant"},{"text",o["transcript"]}});
         }
@@ -391,7 +399,8 @@ void Session::tick(){
     }
     if(configured&&!narrationSuppressed&&!responseActive&&expected.isEmpty()&&!localSpeech&&playback.pending.isEmpty()&&now-lastPlaybackPush>300&&!acknowledgements.isEmpty()){
         const auto c=acknowledgements.takeLast();acknowledgements.clear();
-        if(c.generation==generation)requestReply({c.text,c.utterance,generation,true},"Acknowledge the actual tool result accurately in one short sentence: say that you do it. Do not ask the user anything that the tool result does not ask. Do not call tools.");
+        const bool said=c.instruction!="failed"&&spoken.contains(c.utterance);
+        if(c.generation==generation&&!said)requestReply({c.text,c.utterance,generation,true},"Acknowledge the actual tool result accurately in one short sentence: say that you do it. Do not ask the user anything that the tool result does not ask. Do not call tools.");
     }
     if(configured&&!responseActive&&expected.isEmpty()&&!localSpeech&&!deferred.isEmpty()&&(!deferred.last().progress||(playback.pending.isEmpty()&&now-lastPlaybackPush>300))){
         auto c=deferred.takeLast();deferred.clear();if(c.generation==generation)requestReply(c,c.instruction);
@@ -426,7 +435,7 @@ QJsonObject Session::replyRequest(const ResponseContext &context,const QString &
         // A response's instructions replace the session's: the rules stay with it (one assistant, no
         // steps for the user, the user's language). Without them an acknowledgement told the user to
         // choose the TV's input, and an update came in Korean (the G100 S, 2026-10-05).
-        response["instructions"]=prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))
+        response["instructions"]=prompt+timeNote()+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))
             +"\n\n"+instruction+(language.isEmpty()?QString():"\nSpeak "+language+", as the user does.")+"\nVerified updates:\n"+context.text;
         if(context.utterance.isEmpty()){
             // An update of its own (progress, a task's end) is spoken outside the conversation: inside
@@ -446,7 +455,9 @@ void Session::tool(QString name,QJsonObject args,QString callId,QString response
     auto result=[this,callId,context](QJsonObject o){
         if(!configured)return;send({{"type","conversation.item.create"},{"item",QJsonObject{{"type","function_call_output"},{"call_id",callId},{"output",QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact))}}}});
         // Read the actual tool result once the current model response has finished.
-        if(context.generation==generation)acknowledgements.append(context);
+        // A failure is said; a success only when the reply that called the tool said nothing (it said
+        // "好，我开始画" and then again "好，我在用 Krita 画……", 2026-10-06).
+        if(context.generation==generation){auto c=context;if(o.contains("error"))c.instruction="failed";acknowledgements.append(c);}
     };
     if(!responses.contains(responseId)||context.generation!=generation||context.progress||context.text.isEmpty()){result({{"error","This utterance was interrupted or has no finalized transcript"}});return;}
     const QString raw=context.text;
@@ -513,7 +524,7 @@ void Session::changed(QString tid){
     // A task on the conversation's own thread ends with that thread's turn, whose result VoiceAgent has
     // said (docs/115): said here only for tasks of their own thread (read-only, parallel).
     if(t->terminal()&&t->conversation==conversation&&!t->shared)notices.append(t->text.left(80)+": "+t->status+". "+t->result.left(500));
-    if(configured)send({{"type","session.update"},{"session",QJsonObject{{"type","realtime"},{"instructions",prompt+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))}}}});
+    if(configured)send({{"type","session.update"},{"session",QJsonObject{{"type","realtime"},{"instructions",prompt+timeNote()+"\nTrusted task snapshot:\n"+QString::fromUtf8(QJsonDocument(trusted()).toJson(QJsonDocument::Compact))}}}});
     state();
 }
 // Push-to-talk at work no longer holds the call's tasks (ExternalBusy is kept, unused): they join

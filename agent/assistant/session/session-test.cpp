@@ -335,6 +335,13 @@ int main(int argc,char **argv){
         const int messages=events("message").size();
         p.incoming({{"type","response.output_audio_transcript.done"},{"response_id","r2"},{"item_id","a2"},{"transcript","The answer."}});
         check(events("message").size()==messages&&events("aloud").size()==1,"a reading is heard, never shown as a message");
+        // A reply that said "好，我开始画" before its tool call is not followed by a second acknowledgement.
+        p.responses["r3"]={"画一颗星星","press-50",p.generation,false};
+        p.incoming({{"type","response.output_audio_transcript.done"},{"response_id","r3"},{"item_id","a3"},{"transcript","好，我开始画。"}});
+        p.acknowledgements={{"画一颗星星","press-50",p.generation,false}};p.expected.clear();p.responseActive=false;p.lastPlaybackPush=-100000;
+        p.tick();
+        check(p.expected.isEmpty()&&p.acknowledgements.isEmpty(),"no second acknowledgement after a reply that spoke");
+        check(p.timeNote().contains("Current local time"),"the voice is told the local time");
         // A task on the conversation's own thread is not announced here (VoiceAgent says its result).
         auto shared=p.tasks.add("draw",false,"ptt","k");p.tasks.find(shared)->status="completed";p.notices.clear();p.changed(shared);
         check(p.notices.isEmpty(),"a shared task's result is not said twice");

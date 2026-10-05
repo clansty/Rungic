@@ -431,6 +431,15 @@ PRESS_NOTE = ('\n\n## This session\n\nThe user talks with you by holding the tal
               'call: each press is one complete utterance, and the user hears you when they do not press.\n')
 
 
+def simplified(text):
+    """Traditional Chinese characters of a transcript as simplified ones (call_proxy's converter)."""
+    try:
+        import call_proxy
+        return call_proxy.simplified(text)
+    except Exception:  # noqa: BLE001 - without the converter the words stay as they are
+        return text
+
+
 def realtime_instructions():
     """Push-to-talk's voice prompt: phone.md, how the user talks, and the desktop's language."""
     return prompt('phone.md') + PRESS_NOTE + language_note()
@@ -1328,6 +1337,8 @@ class VoiceAgent:
                 self.segments[item] = (role, self.press if role == 'user' else 0, time.time())
             delta = {'type': 'delta', 'role': role, 'id': item, 'text': event.get('text', '')}
             if role == 'user':
+                delta['text'] = simplified(delta['text'])
+            if role == 'user':
                 delta['press'] = self.segments[item][1]
             self.emit(delta, keep=False)
             return True
@@ -1338,7 +1349,8 @@ class VoiceAgent:
             item = event.get('id') or ''
             role, press, started = self.segments.pop(item, (event.get('role'), 0, 0))
             if event.get('role') == 'user' and item.startswith('press-'):
-                event['press'] = int(item[6:] or 0)
+                # Transcripts often come in traditional characters (docs/59): shown simplified.
+                event['press'], event['text'] = int(item[6:] or 0), simplified(event.get('text', ''))
                 self.store.touch(self.thread_id, event.get('text', ''))
             elif started:
                 event['started'] = started

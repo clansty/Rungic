@@ -41,6 +41,7 @@ public:
     quint64 pressSent=0;          // press: samples of the current reply sent to the adapter
     qint64 pressHeardMs=-1;       // press: how much of the reply the user heard when they pressed
     QSet<QString> aloud;          // press: responses reading a text aloud (heard, not shown)
+    QSet<QString> spoken;         // utterances whose reply said something (no second acknowledgement)
     QStringList notices;
     QHash<int,std::function<void(QJsonObject)>> callbacks;
     int requests=0;
@@ -65,6 +66,7 @@ public:
     static int chunksDue(quint64 pushed,quint64 played,quint64 start);
     void replyTooLong();
     void stopSpeaking();
+    QString timeNote() const;
     void pressCommand(const QString &method,const QJsonObject &args,std::function<void(QJsonObject)> done);
     void requestReply(ResponseContext context,QString instruction={});
     QJsonObject replyRequest(const ResponseContext &context,const QString &instruction) const;
