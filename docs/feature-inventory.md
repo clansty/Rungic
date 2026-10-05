@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 162 条功能、705 条体验，其中 662 条有检查。
+共 163 条功能、710 条体验，其中 667 条有检查。
 
 ## Agent 能力
 
@@ -126,6 +126,24 @@
 
 文档：[docs/89-agent-progress.md](../docs/89-agent-progress.md)、[docs/88-agent-visible-work.md](../docs/88-agent-visible-work.md)、[docs/research/92-agent-task-speed.md](../docs/research/92-agent-task-speed.md)
 
+#### 随时介入正在做的任务（实验）
+
+`agent.task-control` · Linux 系统功能 — 按住说话、电话和导播台共用一套控制：给正在做的任务补一句话不会丢，停止要确认真的停下，用户可以在导播台接手一块屏再交还，服务重启后接着做。
+
+经由接口：`platform-bridge`
+
+- **E1** 在导播台全屏里点“接手”，或在助理工作时直接触摸它的屏幕，就接手了这块屏：助理的桌面工具不再操作这块屏（还能看），屏上显示“你在操作 · 助理在等”。点“交还”或离开全屏就交还；助理下一步先看屏幕，不撤销用户做的事。持有它的窗口没了，10 分钟后自动交还。（单元测试、系统测试）
+- **E2** 给正在做的任务的话（电话里的更正、导播台的“告诉助理”）先存到盘上再送：送进正在跑的那一轮；那一轮刚好结束，就在同一线程开新一轮带上这句话，任务接着做；Codex 暂时不在，就保存起来，等这一轮结束或服务重启后再送。话不会丢。（单元测试）
+- **E3** 停止（按住说话的停止按钮、导播台的停止）在 Codex 确认这一轮已结束后才显示“已停下”；确认不了就说没停下。停止时也丢掉为这个任务存着的话，不会被它们重新启动。（单元测试）
+- **E4** 服务重启时正在做的工作记在盘上。30 分钟内中断的，重启后在原来的线程接着做（并行任务回到它的工作区，组长重新叫起没做完的成员），对话里说明一句；更早的只说明，用户说“继续”再接着做。（单元测试）
+- **E5** 有任务在某块屏上工作时，导播台的工具栏多出“告诉助理”“接手”“停止”。“告诉助理”在顶部输入，话只送到这块屏上的任务。团队成员的屏由组长转达，停止成员也由组长执行。（单元测试、系统测试）
+
+注意：
+- Codex app-server 是语音服务的子进程，服务重启时正在跑的回合随之中断；线程记录里这一轮仍显示 inProgress，要看线程状态是否 active 才知道是否真在跑。 [docs/114-task-control.md](../docs/114-task-control.md)
+- 一个工作区的占用超过 20 分钟没有刷新就会失效。并行任务做得久（一幅画画了半小时）时会失去工作区，现在每次有进展都会刷新占用。 [docs/114-task-control.md](../docs/114-task-control.md)
+
+文档：[docs/114-task-control.md](../docs/114-task-control.md)
+
 #### Agent 电话模式（实验）
 
 `agent.phone-mode` · Linux 系统功能 — 像打电话一样和 Agent 连续对话，任务在后台执行，可以随时打断或追加。
@@ -143,7 +161,7 @@
 - **E9** 有效语音到播报静音 P95 不超过 200 ms，完整话语到首音 P95 不超过 2.5 s（兜底 4 s），意图路由大样本不低于 95%，可连续进行 30 分钟。（单元测试）
 - **E10** 通话代理的桌面步骤（以及没有共用执行端时的任务）停止或撤销工具租约时，只结束它自己的工具进程组（包括忽略 SIGTERM 的后代和工具进程意外退出后留下的），用户自己运行的应用不受影响。没有租约的工具调用被拒绝。通话里要动手的任务和按住说话一样，停止即中断这一轮。（单元测试）
 - **E11** 按用户实际说的语言识别和回答，不强制用桌面界面的语言。（单元测试）
-- **E12** 服务重启后不重放排队中或做到一半的任务，按后端的实际状态恢复显示（标为已中断）。（单元测试）
+- **E12** 服务重启后不重放排队中的任务。做到一半的工作按 agent.task-control/E4 接着做，其余按后端的实际状态显示（标为已中断），已断开的回合不显示为进行中。（单元测试）
 - **E13** 对话顶栏的电话按钮在当前对话里开始通话，对话列表的“和 Agent 通话”新开一段对话再开始。不能开始时（Agent 正在替你打电话、另一段对话在通话）按钮显示为不可用，点一下说明原因。（单元测试）
 - **E14** 顶栏下方的通话条显示当前状态和通话时长。状态包括“正在连接、等你回答、正在回答、正在听、正在处理、麦克风已关、通话中”。用户可以静音、挂断或打开通话面板。面板提供打断、通话任务及状态和“去回答”。通话属于其他对话时，通话条显示“前往”。重新打开应用时，界面根据会话快照恢复。（单元测试）
 - **E15** 通话结束在对话里留下摘要：时长、这次通话发起和完成的任务数，有任务在等回答时可直接去回答，也可以再打给它。（单元测试）
@@ -3036,7 +3054,7 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 
 | 接口 | 说明 | 使用它的功能 | 使用方测试 | 提供方测试 |
 |---|---|---|---|---|
-| `platform-bridge` 平台桥 | Rungic 应用通过 files/tmp/platform.sock 提供 Unix socket 接口，每行传输一个 JSON 对象。接口涵盖状态、显示、亮度、方向、振动、设置面板、桌面模式、助理屏、电视、导播台和文字提交。 | `agent.voice`、`agent.progress`、`agent.phone-mode`、`agent.workspaces`、`agent.where`、`delivery.acceptance`、`delivery.agent-diagnostics`、`delivery.system-tests`、`desktop-mode.on-off`、`desktop-mode.floating-window`、`desktop-mode.fullscreen`、`desktop-mode.cast-connect`、`desktop-mode.tv-computer-mode`、`desktop-mode.tv-touchpad`、`desktop-mode.audio-follow`、`desktop-mode.director`、`desktop-mode.tv-director`、`desktop-mode.remote-viewing`、`desktop-mode.cast-test-pattern`、`desktop.orientation`、`desktop.resolution-refresh`、`desktop.brightness`、`desktop.host-bridges`、`desktop.power`、`desktop.device-panel` | 11 | 1 |
+| `platform-bridge` 平台桥 | Rungic 应用通过 files/tmp/platform.sock 提供 Unix socket 接口，每行传输一个 JSON 对象。接口涵盖状态、显示、亮度、方向、振动、设置面板、桌面模式、助理屏、电视、导播台和文字提交。 | `agent.voice`、`agent.progress`、`agent.task-control`、`agent.phone-mode`、`agent.workspaces`、`agent.where`、`delivery.acceptance`、`delivery.agent-diagnostics`、`delivery.system-tests`、`desktop-mode.on-off`、`desktop-mode.floating-window`、`desktop-mode.fullscreen`、`desktop-mode.cast-connect`、`desktop-mode.tv-computer-mode`、`desktop-mode.tv-touchpad`、`desktop-mode.audio-follow`、`desktop-mode.director`、`desktop-mode.tv-director`、`desktop-mode.remote-viewing`、`desktop-mode.cast-test-pattern`、`desktop.orientation`、`desktop.resolution-refresh`、`desktop.brightness`、`desktop.host-bridges`、`desktop.power`、`desktop.device-panel` | 11 | 1 |
 | `kwin-android-host` KWin 安卓宿主 | KWin 的 android-host 后端连接 Rungic 应用内的宿主。接口提供输出、帧时钟、零拷贝呈现、显式同步、空闲抑制和投屏输出。 | `agent.workspaces`、`apps.gpu`、`apps.vulkan`、`apps.xwayland-gpu`、`delivery.acceptance`、`delivery.trace`、`delivery.probes`、`desktop-mode.tv-computer-mode`、`desktop-mode.external-screen`、`desktop-mode.tv-director`、`desktop-mode.apk-fullscreen`、`desktop.session`、`desktop.panels`、`desktop.orientation`、`desktop.host-display`、`desktop.resolution-refresh`、`desktop.display-size`、`desktop.power`、`install.desktop-entry`、`install.app-restart-recovery`、`install.apk-build` | — | 5 |
 | `host-input` 宿主输入 | Android 将触摸、按键、指针、手势和输入法文字送入 KWin。输入方式包括直接触摸、触控板、电视遥控和键盘。 | `delivery.acceptance`、`delivery.ui-automation`、`desktop-mode.fullscreen`、`desktop-mode.fullscreen-touch`、`desktop-mode.tv-computer-mode`、`desktop-mode.tv-touchpad`、`desktop-mode.apk-fullscreen`、`desktop.touch`、`desktop.edge-back`、`desktop.android-text` | — | 1 |
 | `camera` 相机 | Android Camera2 通过 PipeWire 相机节点 rungic.camera.N 提供画面，并按需开关相机。平台桥的 capture-info 查询返回可用相机。 | `apps.camera`、`apps.snapshot`、`apps.plasma-camera`、`apps.firefox`、`delivery.acceptance`、`delivery.probes` | 2 | 3 |

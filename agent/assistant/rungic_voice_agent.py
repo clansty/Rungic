@@ -2160,7 +2160,9 @@ class VoiceAgent:
         GLib.idle_add(send)
 
     def on_notification(self, method, params):
-        self.control.on_notification(method, params)
+        control = getattr(self, 'control', None)     # absent in parts built without __init__ (tests)
+        if control is not None:
+            control.on_notification(method, params)
         phone_owned = self.phone and self.phone.notification(method, params)
         if method == 'turn/started':
             self.usage_accounts[(params.get('threadId'), (params.get('turn') or {}).get('id'))] = self.usage_identity()

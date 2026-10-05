@@ -418,16 +418,27 @@ def test_stop_ends_the_task_and_the_answer_and_nothing_trails(service):
     s.reply_audio(3000)
     player = s.players()[-1]
     s.dbus('StopTask')
+    for _ in range(100):
+        if s.codex.of('turn/interrupt'):
+            break
+        time.sleep(0.02)
     assert s.codex.of('turn/interrupt') == [{'threadId': 'A', 'turnId': 'T1'}]
-    assert s.kinds('task-stopped'), 'the task shows as stopped'
+    pump()
     assert player.states[-1] == Gst.State.NULL, 'the answer stops at once'
+    # docs/114: stopped is said when Codex says the turn ended, not when it was asked.
+    assert not s.kinds('task-stopped'), 'not "stopped" before it has'
     before = len(s.pushed())
     s.reply_audio(800)                           # the rest of the cut reply still arrives
     assert len(s.pushed()) == before, 'no trailing half sentence'
     agent.on_notification('thread/realtime/item/completed', {'threadId': 'A', 'item': {
         'type': 'transcriptSegment', 'role': 'assistant', 'id': 'S1', 'text': 'cut'}})
     agent.on_notification('turn/completed', {'threadId': 'A', 'turn': {'id': 'T1', 'status': 'interrupted'}})
-    pump()
+    for _ in range(100):
+        pump()
+        if s.kinds('task-stopped'):
+            break
+        time.sleep(0.02)
+    assert s.kinds('task-stopped'), 'the task shows as stopped once it has'
     assert not agent.agent_busy and s.kinds('agent-finished')
     s.reply_audio(300)
     assert len(s.pushed()) > before, 'the next answer plays again'

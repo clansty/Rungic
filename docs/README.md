@@ -242,3 +242,5 @@ Every feature, the experience it must give and the code, tests and documents beh
 | [107-android-sms.md](107-android-sms.md) | Android SIM text messages, send status and filtered replies (2026-10-04) |
 | [108-codec-bridge-buffers.md](108-codec-bridge-buffers.md) | Hardware video decoding straight through msm_vidc V4L2 (5x less CPU), the MediaCodec bridge with DMA-BUFs and 10-bit as fallback; the Iris driver (2026-10-04) |
 | [109-dev-release-channel.md](109-dev-release-channel.md) | The dev release channel: releases from origin/main with the APK, bundles, deploy/status on every phone, GitHub pre-releases; how apt keeps our packages (2026-10-04) |
+| [113-independent-linux-services.md](113-independent-linux-services.md) | Linux user services and replaceable hardware backends: their lifetime, Android 16 root probes, what is still to check |
+| [114-task-control.md](114-task-control.md) | Stepping into work under way: words kept until they reach the task, verified stop, take over and give back in the director, work continued after a restart (2026-10-06) |
