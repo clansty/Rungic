@@ -64,6 +64,8 @@ features:
         text: 没配 OpenAI API Key 时只有语音不可用并提示去配置，打字照常。没装 Codex 时服务不退出，对话里提示先安装。
       - id: E9
         text: 助理执行由 Linux 用户管理器常驻。手机图形会话停止或尚未打开时，服务与任务不跟随退出。
+      - id: E10
+        text: 只有用户自己说的或打的话才会交给执行。任务结果、进度和 Agent 的提问都不算请求，语音只念给用户听，并等用户回答。语音没等用户开口就自己开的一轮会被当场停下，不显示成任务。
     pitfalls:
       - text: Codex 的实时会话固定用服务端 VAD（静音 500 ms 即结束一轮），app-server 不提供修改或手动提交的接口。所以按住期间先存本地、松手后整段上传并补 900 ms 静音。
         docs: [docs/59-voice-agent.md, docs/87-agent-app-redesign.md]

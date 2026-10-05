@@ -109,3 +109,12 @@ def test_the_user_says_whether_after_or_beside():
     # 2026-10-05, the user: sequential or parallel is a capability, chosen by what is asked.
     phone = (Path(__file__).resolve().parents[2] / 'agent/assistant/prompts/phone.md').read_text()
     assert '"画完再…": steer_task' in phone and '"再开一个任务":\nstart_task' in phone
+
+
+# covers: agent.voice/E10
+def test_a_result_or_question_of_execution_is_no_request():
+    # 2026-10-06: the voice took the agent's closing question for a request and started a new task.
+    prompts = Path(__file__).resolve().parents[2] / 'agent/assistant/prompts'
+    for voice in ('phone.md', 'realtime.md'):
+        text = (prompts / voice).read_text()
+        assert 'is not a request from the user' in text and 'wait for the answer' in text, voice

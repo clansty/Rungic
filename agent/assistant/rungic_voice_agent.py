@@ -842,6 +842,15 @@ class VoiceAgent:
         self.endpointer = Endpointer()
         self.hands_free = False      # listening until speech ends, not until release
         self.talk_started = 0.0
+        # The user's own requests (docs/114, "the voice's own words are no request"): when the user last
+        # pressed to talk, typed or told a task something, and when a request last started or joined
+        # work. Push-to-talk's voice may start a turn of its own only for words said after that: it took
+        # the agent's closing question ("draw a moon too?") for a request and started it (2026-10-06).
+        self.user_input_at = 0.0
+        self.request_used_at = 0.0
+        self.turn_inputs = 0            # user messages of the running turn
+        self.turn_announced = True      # its agent-started was sent (it waits for the turn's first input)
+        self.refused_turn = None        # a turn the voice started of itself: stopped, never shown
         # Transcript segments being spoken or transcribed: item id -> (role, press, start time).
         self.segments = {}
         # thread/realtime/start was sent and neither started nor closed has come back:
@@ -1491,7 +1500,7 @@ class VoiceAgent:
         self.press_audio = b''
         self.endpointer = Endpointer()
         self.hands_free = False
-        self.talk_started = time.monotonic()
+        self.talk_started = self.user_input_at = time.monotonic()
         # During a proxied call the user talks to the call agent: keep the audio
         # here instead of sending it to the assistant's own realtime session.
         self.owner_audio = b'' if self.call and self.call.active else None
@@ -1968,6 +1977,7 @@ class VoiceAgent:
     def steer_screen(self, slot, text):
         """The director's "Tell": the user's words for the work on screen `slot`, kept until they reach it."""
         text = text.strip()
+        self.user_input_at = time.monotonic()
         work = self.screen_work(slot)
         if not text:
             raise ValueError(_('Say what the assistant should do'))
@@ -2254,7 +2264,10 @@ class VoiceAgent:
             with self.turn_lock:
                 self.turn = task_state.TurnState()
             self.told = {}
-            self.emit({'type': 'agent-started'})
+            # Said with the turn's first input (agent_input): a turn the voice started of itself is
+            # never shown.
+            self.turn_inputs = 0
+            self.turn_announced = False
             GLib.idle_add(self.set_state)
             GLib.idle_add(self.start_progress)
         elif method == 'error':
@@ -2263,6 +2276,12 @@ class VoiceAgent:
                 self.emit({'type': 'error', 'text': error.get('message', _('The agent request failed'))})
         elif method == 'turn/completed':
             completed = params.get('turn') or {}
+            refused = completed.get('id') and completed.get('id') == getattr(self, 'refused_turn', None)
+            if refused:
+                completed = {**completed, 'status': 'completed', 'error': None}
+            elif not getattr(self, 'turn_announced', True):
+                self.turn_announced = True
+                self.emit({'type': 'agent-started'})
             if completed.get('status') == 'failed' or completed.get('error'):
                 error = completed.get('error') or {}
                 self.emit({'type': 'error', 'text': error.get('message', _("The agent couldn't finish this task"))})
@@ -2291,13 +2310,25 @@ class VoiceAgent:
             with self.turn_lock:
                 final = self.turn.snapshot() if self.turn else None
                 self.turn = None
-            if final and (final['plan'] or final['recent'] or final['files']):
+            if refused:
+                self.refused_turn = None
+            elif final and (final['plan'] or final['recent'] or final['files']):
                 final.pop('current', None)
                 self.emit({'type': 'task', 'final': True, **final})
-            self.emit({'type': 'agent-finished'})
+            if not refused:
+                self.emit({'type': 'agent-finished'})
             GLib.idle_add(self.set_state)
         elif method in ('item/started', 'item/completed'):
-            self.agent_item(method.endswith('completed'), params.get('item') or {})
+            item = params.get('item') or {}
+            if method == 'item/started' and item.get('type') == 'userMessage':
+                self.agent_input(item, params.get('turnId') or self.turn_id)
+            refused = getattr(self, 'refused_turn', None)
+            if not getattr(self, 'turn_announced', True) and refused != (params.get('turnId') or self.turn_id):
+                self.turn_announced = True
+                self.emit({'type': 'agent-started'})
+            if refused and refused == (params.get('turnId') or self.turn_id):
+                return
+            self.agent_item(method.endswith('completed'), item)
             with self.turn_lock:
                 changed = self.turn is not None and self.turn.on_item(params.get('item') or {}, method.endswith('completed'))
             if changed:
@@ -2748,6 +2779,24 @@ class VoiceAgent:
         self.control.started(self.thread_id, self.turn_id)
         threading.Thread(target=self.stop_verified, args=(self.thread_id,), daemon=True).start()
 
+    def agent_input(self, item, turn):
+        """A user message of the open conversation's turn. One that push-to-talk's voice wrote
+        (<realtime_delegation>) and that starts a turn needs words the user said after the last request
+        started or joined work; else the voice took something else (the agent's own result or question)
+        for a request: the turn is stopped and not shown (docs/114)."""
+        text = ''.join(c.get('text', '') for c in item.get('content') or [] if isinstance(c, dict))
+        first = getattr(self, 'turn_inputs', 0) == 0
+        self.turn_inputs = getattr(self, 'turn_inputs', 0) + 1
+        delegated = text.lstrip().startswith('<realtime_delegation>')
+        if delegated and first and getattr(self, 'user_input_at', 0.0) <= getattr(self, 'request_used_at', 0.0):
+            log('self-delegation refused:', turn, text[:300].replace('\n', ' '))
+            self.refused_turn = turn
+            if turn:
+                self.control.started(self.thread_id, turn)
+            threading.Thread(target=self.control.stop, args=(self.thread_id,), daemon=True).start()
+            return
+        self.request_used_at = time.monotonic()
+
     def stop_verified(self, thread):
         """Stop is done when Codex says the turn ended (task_control.stop), not when it was asked."""
         done = self.control.stop(thread)
@@ -2953,6 +3002,7 @@ class VoiceAgent:
             return
         text = text.strip()
         paths = [a['path'] for a in attachments if a.get('path')]
+        self.user_input_at = time.monotonic()
         if self.call and self.call.active and text and not paths:
             self.call.instruct(text)
             return

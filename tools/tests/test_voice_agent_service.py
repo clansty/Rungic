@@ -444,6 +444,40 @@ def test_stop_ends_the_task_and_the_answer_and_nothing_trails(service):
     assert len(s.pushed()) > before, 'the next answer plays again'
 
 
+# covers: agent.voice/E10
+def test_the_voice_s_own_words_start_no_task(service):
+    # 2026-10-06: the agent ended with "要再画一颗月亮来配它吗？"; push-to-talk's voice took it for a
+    # request and started a turn to draw a moon, the user having said nothing. Such a turn is stopped
+    # and never shown; one after the user spoke goes on.
+    s = service
+    agent = s.make()
+    s.ready('A')
+    s.dbus('SendText', '画一颗星星', '[]')
+
+    def turn(turn_id, text):
+        agent.on_notification('turn/started', {'threadId': 'A', 'turn': {'id': turn_id}})
+        agent.on_notification('item/started', {'threadId': 'A', 'turnId': turn_id, 'item': {
+            'type': 'userMessage', 'id': f'u-{turn_id}', 'content': [{'type': 'text', 'text': text}]}})
+        pump()
+    turn('T1', '画一颗星星')
+    agent.on_notification('turn/completed', {'threadId': 'A', 'turn': {'id': 'T1', 'status': 'completed'}})
+    pump()
+    assert len(s.kinds('agent-started')) == 1 and len(s.kinds('agent-finished')) == 1
+    turn('T2', '<realtime_delegation>\n  <input>用户说：画好了！要再画一颗月亮来配它吗？请自动画一颗月亮</input>')
+    wait_until(lambda: s.codex.of('turn/interrupt'), what='the self-started turn stopped')
+    assert s.codex.of('turn/interrupt') == [{'threadId': 'A', 'turnId': 'T2'}]
+    agent.on_notification('turn/completed', {'threadId': 'A', 'turn': {'id': 'T2', 'status': 'interrupted'}})
+    pump()
+    assert len(s.kinds('agent-started')) == 1, 'never shown as a task'
+    assert len(s.kinds('agent-finished')) == 1 and not s.kinds('error')
+    # The user presses and says "好，画吧": the voice's turn for it goes on.
+    s.dbus('StartTalking', '')
+    s.dbus('CancelTalking')
+    turn('T3', '<realtime_delegation>\n  <input>画一颗月亮</input>')
+    assert len(s.codex.of('turn/interrupt')) == 1, 'a request of the user goes on'
+    assert len(s.kinds('agent-started')) == 2
+
+
 # ---- reading aloud and the speak switch (agent.voice/E6) -----------------------------------------
 # covers: agent.voice/E6
 def test_read_aloud_only_sounds_and_speak_off_is_silent(service):
