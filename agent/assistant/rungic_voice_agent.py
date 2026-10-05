@@ -104,7 +104,8 @@ WORKSPACE = 1
 RESUME_TEXT = ('The assistant service restarted and stopped your work on this task. Sub-agents that you started '
                'stopped too. Look at the current state of the screen and the files. Then continue the task from '
                'where it stopped. Do not do again the steps that are complete. Start sub-agents again only for '
-               'parts that are not complete.')
+               'parts that are not complete. Write to the user in the language that the user used in this '
+               'conversation, not in the language of this message.')
 # Spoken progress while the agent works: Codex hands agent updates to the voice
 # model as context only (no response), so it would stay silent until the end.
 # Spoken progress (docs/89): by events, not by the clock. The screen shows every step; the
