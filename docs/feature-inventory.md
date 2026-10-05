@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 162 条功能、700 条体验，其中 656 条有检查。
+共 162 条功能、701 条体验，其中 657 条有检查。
 
 ## Agent 能力
 
@@ -2051,6 +2051,7 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 - **E3** 新会话等上一个会话的 startplasma-wayland 真正退出后才设置环境，plasmashell 总以手机 shell 启动，不会变成桌面版 shell。（系统测试、人工）
 - **E4** GPU 设置、登录 PATH 在任何会话单元启动前导入用户管理器。Qt 按 XDG_CURRENT_DESKTOP 选平台主题，旧会话强加的主题不残留到新会话。（实机验收）
 - **E5** 桌面上没有 Linux 锁屏挡住（锁定交给安卓），kaccess 不在没有 X 显示的会话里反复崩溃。（系统测试）
+- **E6** 熄屏或应用退到后台时，KWin 不为看不见的画面合成，客户端也不再重绘，待机不白耗电；亮屏后画面立即恢复。（人工）
 
 注意：
 - 上一个会话的 startplasma-wayland 退出时会把用户管理器环境恢复成它启动前的样子，曾删掉 PLASMA_DEFAULT_SHELL，让 plasmashell 以桌面版 shell 启动。 [docs/96-desktop-recovery-after-apk-restart.md](../docs/96-desktop-recovery-after-apk-restart.md)

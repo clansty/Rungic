@@ -48,6 +48,10 @@ features:
         text: GPU 设置、登录 PATH 在任何会话单元启动前导入用户管理器。Qt 按 XDG_CURRENT_DESKTOP 选平台主题，旧会话强加的主题不残留到新会话。
       - id: E5
         text: 桌面上没有 Linux 锁屏挡住（锁定交给安卓），kaccess 不在没有 X 显示的会话里反复崩溃。
+      - id: E6
+        text: 熄屏或应用退到后台时，KWin 不为看不见的画面合成，客户端也不再重绘，待机不白耗电；亮屏后画面立即恢复。
+        evidence:
+          - {doc: docs/96-desktop-recovery-after-apk-restart.md, date: 2026-10-05, note: "D节：两个测试窗口熄屏，KWin 单核占用 6.68% → 0.003%，亮屏约 2 秒恢复"}
     pitfalls:
       - text: 上一个会话的 startplasma-wayland 退出时会把用户管理器环境恢复成它启动前的样子，曾删掉 PLASMA_DEFAULT_SHELL，让 plasmashell 以桌面版 shell 启动。
         docs: [docs/96-desktop-recovery-after-apk-restart.md]
