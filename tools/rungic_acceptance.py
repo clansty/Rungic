@@ -965,16 +965,14 @@ def write_report(path, report, initial=False):
 def verdict(statuses, manual, state, metadata_errors=None, *, initial_missing=False, scope_known=True, chain_errors=None, identity_errors=None):
     """Use the same quality decision for an attempt and for combined attempts."""
     reasons = []
-    if initial_missing:
-        return 'incomplete', ['initial-missing']
-    if identity_errors:
-        return 'incomplete', ['identity-errors']
     if 'fail' in statuses:
         reasons.append('automatic-failure')
     if any(r['status'] == 'fail' for r in manual):
         reasons.append('manual-failure')
-    if reasons:
-        return 'fail', reasons
+    if initial_missing:
+        reasons.append('initial-missing')
+    if identity_errors:
+        reasons.append('identity-errors')
     if not statuses:
         reasons.append('empty-plan')
     if any(status != 'pass' for status in statuses):
@@ -989,7 +987,8 @@ def verdict(statuses, manual, state, metadata_errors=None, *, initial_missing=Fa
         reasons.append('unknown-scope')
     if chain_errors:
         reasons.append('chain-errors')
-    return ('incomplete' if reasons else 'pass'), reasons
+    failed = 'automatic-failure' in reasons or 'manual-failure' in reasons
+    return ('fail' if failed else 'incomplete' if reasons else 'pass'), reasons
 
 
 def result_counts(rows, manual=()):
@@ -1100,17 +1099,26 @@ def run_scenarios(selected, release=None, out_dir=None, since=None, skips=None, 
                 except Exception as error:
                     row = result(False, error=f'{type(error).__name__}: {error}', trace=traceback.format_exc()[-1500:])
                 row['status'] = 'pass' if row['passed'] is True else 'fail' if row['passed'] is False else 'unimplemented'
-            if row['passed'] is False and scenario.get('screenshot_on_failure', True):
+            capture_failure = row['passed'] is False and scenario.get('screenshot_on_failure', True)
+            if capture_failure:
+                row['details']['screenshot_error'] = '截图未完成'
+            rows[i] = {'id': scenario['id'], 'title': scenario['title'], 'level': scenario['level'], **row,
+                       'seconds': round(time.monotonic() - began, 1)}
+            save()  # persist the observation before supplementary evidence collection
+            if capture_failure:
                 try:
                     shot = Path(rungic_agent.screenshot())
                     target = out_dir / f"{scenario['id']}.png"
                     shot.replace(target)
                     row['details']['screenshot'] = str(target)
-                except Exception:
-                    pass
-            rows[i] = {'id': scenario['id'], 'title': scenario['title'], 'level': scenario['level'], **row,
-                       'seconds': round(time.monotonic() - began, 1)}
-            save()
+                    row['details'].pop('screenshot_error', None)
+                except BaseException as error:
+                    row['details']['screenshot_error'] = f'截图未完成：{type(error).__name__}: {error}'
+                    save()
+                    if not isinstance(error, Exception):
+                        raise
+                else:
+                    save()
             print(f"{row['status'].upper()} {scenario['id']} ({rows[i]['seconds']} s)", flush=True)
         base_path, base = previous_report(release, {r['id'] for r in rows})
         if base:
@@ -1172,6 +1180,7 @@ def attempt_name(i):
 
 
 def identity_errors(attempts):
+    attempts = [(path, report) for path, report in attempts if not report.get('missing')]
     if len(attempts) < 2:
         return []
     fields = [('device', 'serial', '手机序列号'), ('device', 'fingerprint', '固件'),
@@ -1187,7 +1196,7 @@ def identity_errors(attempts):
             values.append(value)
         for i, value in enumerate(values):
             if value is None or value == '':
-                errors.append(f'{attempt_name(i)}报告缺少{label}，无法确认是同一份安装。')
+                errors.append(f'{attempt_name(i)}报告缺少{" " if label.startswith("APK") else ""}{label}，无法确认和首次是同一份安装。')
         if all(v is not None and v != '' for v in values) and any(v != values[0] for v in values[1:]):
             errors.append(f'首次和重试不是同一现场：{label}不同（' + ' → '.join(map(str, values)) + '）。')
     return errors
@@ -1206,16 +1215,23 @@ def combine(attempts, chain_warnings=()):
             if row['id'] not in manual or (not environment_errors and row['status'] in ('pass', 'fail')):
                 manual[row['id']] = row
     manual = list(manual.values())
-    counts = result_counts(list(observed.values()), manual)
+    mergeable = not environment_errors and not first.get('missing')
+    decision_rows = list(observed.values()) if mergeable else [r for _, report in attempts for r in report.get('scenarios', [])]
+    decision_manual = manual if mergeable else [r for _, report in attempts for r in report.get('manual_results', [])]
+    counts = result_counts(decision_rows, decision_manual)
+    failures = [{'attempt': attempt_name(i), 'source': str(path), 'serial': report.get('device', {}).get('serial'), 'id': row['id'], 'kind': kind}
+                for i, (path, report) in enumerate(attempts)
+                for kind, rows in (('automatic', report.get('scenarios', [])), ('manual', report.get('manual_results', [])))
+                for row in rows if scenario_status(row) == 'fail'] if not mergeable else []
     flaky = [] if environment_errors else [id for id, row in observed.items() if scenario_status(row) == 'pass' and
              any(scenario_status(r) == 'fail' for _, report in attempts
                  for r in report.get('scenarios', []) if r['id'] == id)]
     automatic_state = next((r.get('state') for _, r in reversed(attempts) if r.get('kind') != 'manual'), None)
-    decision, reasons = verdict([scenario_status(r) for r in observed.values()], manual,
+    decision, reasons = verdict([scenario_status(r) for r in decision_rows], decision_manual,
         automatic_state, any(r.get('metadata_errors') for _, r in attempts),
         initial_missing=first.get('missing', False), scope_known=first.get('scope', 'unknown') != 'unknown',
         chain_errors=chain_warnings, identity_errors=environment_errors)
-    warnings = list(chain_warnings) + environment_errors
+    warnings = list(chain_warnings)
     screen_warning = False
     for i, (_, report) in enumerate(attempts):
         if report.get('missing'):
@@ -1232,7 +1248,7 @@ def combine(attempts, chain_warnings=()):
             warnings.append(prefix + f'开始时手机屏幕没有亮（{screen}）。依赖屏幕的检查可能因此失败。失败不一定来自版本本身。')
         if system.get('in_sync') is False:
             warnings.append(prefix + f'手机上的版本与 {str(system.get("against", "未知"))[:12]} 不同（{len(system.get("differs", []))} 处差异）。结论只适用于实际安装的内容。')
-        if report.get('run_error'):
+        if report.get('run_error') and not (i and report.get('state') == 'interrupted'):
             warnings.append(prefix + '运行停止：' + report['run_error'])
         for key, error in report.get('metadata_errors', {}).items():
             warnings.append(prefix + f'未能读取 {key}：{error}')
@@ -1240,10 +1256,19 @@ def combine(attempts, chain_warnings=()):
             warnings.append(prefix + '部分手机身份或安装身份未知。报告没有用默认值代替。')
         if report.get('source', {}).get('dirty'):
             warnings.append(prefix + '生成报告时工作区有未提交的改动。')
+    grouped_warnings = {}
+    names = {attempt_name(i) for i in range(len(attempts))}
+    for warning in warnings:
+        prefix, separator, body = warning.partition('：')
+        if separator and prefix in names:
+            grouped_warnings.setdefault(body, []).append(prefix)
+        else:
+            grouped_warnings.setdefault(warning, [])
+    warnings = [('和'.join(prefixes) + '：' if prefixes else '') + body for body, prefixes in grouped_warnings.items()]
     return {'first': first, 'latest': latest, 'observed': observed, 'manual': manual, 'counts': counts,
             'flaky': flaky, 'verdict': decision, 'reasons': reasons, 'warnings': warnings,
             'screen_warning': screen_warning, 'identity_errors': environment_errors,
-            'mergeable': not environment_errors and not first.get('missing'), 'state': automatic_state}
+            'mergeable': mergeable, 'state': automatic_state, 'failures': failures}
 
 
 def conclusion_text(combined):
@@ -1254,23 +1279,34 @@ def conclusion_text(combined):
     decision, reasons = combined['verdict'], combined['reasons']
     missing = sum(counts[s] for s in ('skipped', 'unimplemented', 'not-run'))
     pending = counts['manual-not-run']
+    descriptions = {'automatic-failure': f'{counts["fail"]} 项自动检查失败',
+        'manual-failure': f'{counts["manual-fail"]} 项人工失败',
+        'initial-missing': '首次报告缺失，无法确认其余检查的结果',
+        'empty-plan': '没有已知检查计划', 'missing-results': f'{missing} 项没有结果',
+        'manual-pending': f'人工 {pending} 项未填写结果',
+        'unfinished': '运行中断，报告没有记录完成状态',
+        'metadata-errors': '现场信息采集不完整', 'unknown-scope': '原检查范围未记录',
+        'chain-errors': '首次观察的关联不完整',
+        'identity-errors': ''.join(combined['identity_errors']).rstrip('。') + '。不能合成一台手机的结论'}
     if decision == 'fail':
-        descriptions = {'automatic-failure': f'{counts["fail"]} 项自动检查失败',
-                        'manual-failure': f'{counts["manual-fail"]} 项人工失败'}
-        text = '**未通过。** ' + '、'.join(descriptions[r] for r in reasons) + '。'
+        if combined['mergeable']:
+            text = '**未通过。**' + '、'.join(descriptions[r] for r in reasons if r in ('automatic-failure', 'manual-failure')) + '。'
+        else:
+            grouped = {}
+            for failure in combined['failures']:
+                key = (failure['serial'], failure['attempt'], failure['kind'])
+                grouped[key] = grouped.get(key, 0) + 1
+            text = '**未通过。**' + '。'.join(f'手机 {serial or "未知"} 上（{attempt}）{n} 项' +
+                ('自动检查失败' if kind == 'automatic' else '人工检查失败') for (serial, attempt, kind), n in grouped.items()) + '。'
+        text += '。'.join(descriptions[r] for r in reasons if r in ('initial-missing', 'identity-errors', 'metadata-errors'))
+        if any(r in reasons for r in ('initial-missing', 'identity-errors', 'metadata-errors')):
+            text += '。'
     elif decision == 'incomplete':
-        descriptions = {'initial-missing': '首次报告缺失，无法确认其余检查的结果',
-            'empty-plan': '没有已知检查计划', 'missing-results': f'{missing} 项没有结果',
-            'manual-pending': f'人工 {pending} 项未填写结果',
-            'unfinished': '运行中断，报告没有记录完成状态',
-            'metadata-errors': '现场信息采集不完整', 'unknown-scope': '原检查范围未记录',
-            'chain-errors': '首次观察的关联不完整',
-            'identity-errors': ''.join(combined['identity_errors']).rstrip('。') + '。不能合成一台手机的结论'}
-        text = '**未完成。** ' + '。'.join(descriptions[r] for r in reasons) + '。'
+        text = '**未完成。**' + '。'.join(descriptions[r] for r in reasons) + '。'
     elif scope == 'full':
-        text = f'**本次完整检查计划通过。** 自动 {len(rows)} 项、人工 {len(manual)} 项通过。'
+        text = f'**本次完整检查计划通过。**自动 {len(rows)} 项、人工 {len(manual)} 项通过。'
     elif scope == 'smoke':
-        text = f'**自动冒烟检查通过（{counts["pass"]}/{len(rows)}）。** 这是部署后的快速检查，不代表完整检查。'
+        text = f'**自动冒烟检查通过（{counts["pass"]}/{len(rows)}）。**这是部署后的快速检查，不代表完整检查。'
     else:
         text = f'**所选检查通过（{counts["pass"]}/{len(rows)}）。**'
     if combined['flaky']:
@@ -1339,6 +1375,15 @@ def display_time(value):
     return time.strftime('%Y-%m-%d %H:%M:%S') + f'（UTC{offset[:3]}:{offset[3:]}）'
 
 
+def environment_text(report):
+    device = report.get('device', {})
+    battery = device.get('battery', {})
+    front = report.get('front', {}).get('in_front')
+    return (f'屏幕 {md(device.get("screen"))} · 电量 {md(battery.get("level"))}% · ' +
+            yes_no(battery.get('charging'), '充电中', '未充电') + ' · ' +
+            (yes_no(front, 'Rungic 应用在前台', 'Rungic 应用未在前台') if front is not None else 'Rungic 应用是否在前台：未知'))
+
+
 def render_report(path):
     """Render combined saved observations with the existing feature inventory. Do not access the phone."""
     from feature_inventory import Inventory
@@ -1356,7 +1401,7 @@ def render_report(path):
     scope_name = {'smoke': '部署后冒烟', 'full': '完整检查', 'selected': '已选检查'}.get(scope, '范围未记录')
     device, system = latest.get('device', {}), latest.get('system', {})
     actual, serial, screen = system.get('release'), device.get('serial'), device.get('screen')
-    display_serial = serial if combined['mergeable'] else ' → '.join(md(r.get('device', {}).get('serial')) for _, r in attempts)
+    display_serial = serial if combined['mergeable'] else ' → '.join(dict.fromkeys(md(r.get('device', {}).get('serial')) for _, r in attempts))
     def column_name(i):
         name = f'人工补录 {i}' if attempts[i][1].get('kind') == 'manual' else attempt_name(i)
         return name if combined['mergeable'] else name + '（' + md(attempts[i][1].get('device', {}).get('serial')) + '）'
@@ -1392,7 +1437,9 @@ def render_report(path):
               f'| 测的是什么 | {tested_identity} |',
               f'| 结果如何 | {observation_text} |',
               f'| 没测到什么 | 本次计划涉及 {len(run_coverage)}/{len(live_scenarios)} 个用户场景。验收计划没有直接检查的场景 {len(uncovered)} 个。{pending if scope == "full" else len(first.get("manual", []))} 项人工检查未执行 |', '']
-    if failed and combined['screen_warning']:
+    if combined['identity_errors']:
+        next_step = f'在首次那台手机（{md(first.get("device", {}).get("serial"))}）、同一份安装上重新运行重试，并确认报告记录了完整的手机和安装身份。'
+    elif failed and combined['screen_warning']:
         next_step = '亮屏解锁后，在同一安装上重新运行冒烟检查，不需要重新部署。'
     elif failed:
         next_step = f'处理第 3 节的 {failed} 项失败。'
@@ -1414,32 +1461,41 @@ def render_report(path):
         apk = f'{md(apk.get("name"))}（{md(apk.get("version_code"))}）'
     difference = '、'.join(str(r.get('part', '未知部分')) for r in system.get('differs', []))
     source = latest.get('source', {})
-    lines += ['## 1. 测的是哪台手机、哪个版本', '', '| 项目 | 记录 |', '| --- | --- |',
+    lines += ['## 1. 测的是哪台手机、哪个版本', '']
+    if combined['mergeable']:
+        lines += ['| 项目 | 记录 |', '| --- | --- |',
               f'| 手机 | {md(serial)} · 固件 {md(device.get("fingerprint"))} |',
-              f'| 现场 | 屏幕 {md(screen)} · 电量 {md(battery.get("level"))}% · {yes_no(battery.get("charging"), "充电中", "未充电")} · {yes_no(latest.get("front", {}).get("in_front"), "Rungic 应用在前台", "Rungic 应用未在前台") if latest.get("front", {}).get("in_front") is not None else "Rungic 应用是否在前台：未知"} |',
               f'| 实际安装 | {md(actual)} · 提交 {short_sha(system.get("installed_commit", system.get("commit")))} · APK {apk} · 开发覆盖 {md(system.get("overlays"))} 项 |',
-              f'| 与提交对比 | {short_sha(system.get("against"))} · {yes_no(system.get("in_sync"), "一致", "不一致")} · ' + (f'{len(system["differs"])} 处差异：{md(difference) if difference else "无"}' if 'differs' in system else '差异未记录') + ' |',
-              f'| 报告来源 | 源码 {short_sha(source.get("commit"))}（{yes_no(source.get("dirty"), "有未提交改动", "工作区干净")}） · 时间 {display_time(latest.get("time"))} |', '']
-    if not combined['mergeable']:
-        lines += ['各次现场（分别记录，不能合并）：', '', '| 次数 | 手机 | 固件 | 版本 | 安装提交 | APK 版本号 |', '| --- | --- | --- | --- | --- | --- |']
+              f'| 与提交对比 | {short_sha(system.get("against"))} · {yes_no(system.get("in_sync"), "一致", "不一致")} · ' + (f'{len(system["differs"])} 处差异：{md(difference) if difference else "无"}' if 'differs' in system else '差异未记录') + ' |']
+        for i, (_, report) in enumerate(attempts):
+            lines.append(f'| 现场（{column_name(i)}） | {environment_text(report)} |')
+            source = report.get('source', {})
+            lines.append(f'| 报告来源（{column_name(i)}） | 源码 {short_sha(source.get("commit"))}（{yes_no(source.get("dirty"), "有未提交改动", "工作区干净")}） · 时间 {display_time(report.get("time"))} |')
+        lines += ['']
+    else:
+        lines += ['各次现场（分别记录，不能合并）：', '', '| 次数 | 手机 | 固件 | 版本 | 安装提交 | APK 版本号 | 现场 |', '| --- | --- | --- | --- | --- | --- | --- |']
         for i, (_, report) in enumerate(attempts):
             d, installed = report.get('device', {}), report.get('system', {})
             apk_record = installed.get('apk', {})
-            lines.append(f'| {attempt_name(i)} | {md(d.get("serial"))} | {md(d.get("fingerprint"))} | {md(installed.get("release"))} | {short_sha(installed.get("installed_commit"))} | {md(apk_record.get("version_code") if isinstance(apk_record, dict) else None)} |')
+            lines.append(f'| {column_name(i)} | {md(d.get("serial"))} | {md(d.get("fingerprint"))} | {md(installed.get("release"))} | {short_sha(installed.get("installed_commit"))} | {md(apk_record.get("version_code") if isinstance(apk_record, dict) else None)} | {environment_text(report)} |')
         lines += ['']
     history_path = rungic_device.WORKSPACE / 'release/history.json'
     history = json.loads(history_path.read_text()) if history_path.exists() else []
-    prior = [r for r in history if actual and serial and r.get('version') == actual and r.get('serial') == serial]
-    def earlier(entry):
+    def earlier(entry, report):
         try:
-            return recorded_time(entry['time']) < recorded_time(latest['time'])
+            return recorded_time(entry['time']) < recorded_time(report['time'])
         except (KeyError, ValueError, TypeError):
-            return False  # cannot assert the order of a record without its timestamp
-    prior = [r for r in prior if earlier(r)]
-    if prior:
-        lines += ['同一版本、同一手机的部署记录（不能据此认定安装内容相同）：', '']
-        lines += [f'- {display_time(r.get("time"))}：{md(r.get("result"))}' + (f'。重试通过项 {md(r["flaky"])}' if r.get('flaky') else '') for r in prior]
-        lines += ['']
+            return False
+    installations = {}
+    for _, report in attempts:
+        key = (report.get('system', {}).get('release'), report.get('device', {}).get('serial'))
+        installations[key] = report
+    for (version, phone), report in installations.items():
+        prior = [r for r in history if version and phone and r.get('version') == version and r.get('serial') == phone and earlier(r, report)]
+        if prior:
+            lines += [f'手机 {md(phone)}、版本 {md(version)} 的部署记录（不能据此认定安装内容相同）：', '']
+            lines += [f'- {display_time(r.get("time"))}：{md(r.get("result"))}' + (f'。重试通过项 {md(r["flaky"])}' if r.get('flaky') else '') for r in prior]
+            lines += ['']
     lines += ['## 2. 这次检查了什么，关联哪些用户能力', '',
               '关联不表示整条体验要求已经验证。', '',
               '- 真机实测：程序在手机上操作，并判断结果。',
@@ -1449,7 +1505,6 @@ def render_report(path):
               '| --- | --- | --- | ' + ' | '.join('---' for _ in attempts) + ' |']
     interface_ids = []
     for id in observed:
-        covers = definitions.get(id, {}).get('covers', [])
         if definitions.get(id, {}).get('check') == 'interface_contract':
             interface_ids.append(id)
             continue
@@ -1462,14 +1517,18 @@ def render_report(path):
             consumers = [f['title'] for f in catalog.features.values() if f.get('status') != 'retired' and ref in f.get('interfaces', [])]
             values = [f'{column_name(i)}：' + ('缺失' if report.get('missing') else attempt_status(row, report) or '未检查')
                       for i, (_, report) in enumerate(attempts)
-                      for row in [next((r for r in report.get('scenarios', []) if r['id'] == id), None)]]
-            lines.append('- ' + '；'.join(values) + '。' + md(definitions[id].get('title', id)).rstrip('。') +
-                         f'。依赖它的功能：{len(consumers)} 项' + (f'，例如 {md("、".join(consumers[:3]))}。' if consumers else '。'))
+                      for row in [next((r for r in report.get('scenarios', []) if r['id'] == id), None)]
+                      if row is not None or report.get('missing')]
+            lines.append('- ' + '，'.join(values) + '。' + md(definitions[id].get('title', id)).rstrip('。') +
+                         f'。依赖它的功能：{len(consumers)} 项' + (('，例如' if len(consumers) > 3 else '：') + md('、'.join(consumers[:3])) + '。' if consumers else '。'))
     lines += ['', '## 3. 失败与重试', '']
     problems = [id for id in observed if any(scenario_status(r) != 'pass' for _, report in attempts
                 for r in report.get('scenarios', []) if r['id'] == id)]
+    if combined['failures']:
+        lines += [f'- 手机 {md(f["serial"])}（{f["attempt"]}）：{md(f["id"])} 失败。原始文件：{md(f["source"])}' for f in combined['failures']]
+        lines += ['']
     for id in problems:
-        prefix = '⚠ 重试通过（不稳定）' if id in flaky else status(observed[id])
+        prefix = '各次结果' if not combined['mergeable'] else '⚠ 重试通过（不稳定）' if id in flaky else status(observed[id])
         lines += [f'### {prefix}：{md(definitions.get(id, {}).get("title", observed[id].get("title", id)))}', '', '- 关联的用户能力：' + label(id)]
         for ref in definitions.get(id, {}).get('covers', []):
             fid, _, eid = ref.partition('/')

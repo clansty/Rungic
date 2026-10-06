@@ -431,8 +431,8 @@ def test_different_or_unknown_installations_cannot_produce_a_combined_pass(attem
     else:
         target[field] = 'different'
     combined = acc.combine([(Path('first.json'), first), (Path('retry.json'), retry)])
-    assert combined['verdict'] == 'incomplete'
-    assert combined['reasons'] == ['identity-errors']
+    assert combined['verdict'] == 'fail'
+    assert 'identity-errors' in combined['reasons'] and 'automatic-failure' in combined['reasons']
     assert not combined['mergeable'] and not combined['flaky']
     assert combined['observed']['A']['status'] == 'fail'
     assert combined['identity_errors']
@@ -446,7 +446,7 @@ def test_render_shows_each_phone_instead_of_claiming_the_second_inherits_the_fir
     second['device']['serial'] = 'OTHER-PHONE'
     path.write_text(json.dumps(second))
     rendered = acc.render_report(path).read_text()
-    assert '本页合并结论：未完成' in rendered
+    assert '本页合并结论：未通过' in rendered
     assert '手机序列号不同（TEST-PHONE → OTHER-PHONE）' in rendered
     assert '首次（TEST-PHONE）' in rendered and '重试（OTHER-PHONE）' in rendered
     assert '不能合成一台手机的结论' in rendered
@@ -531,3 +531,77 @@ def test_manual_update_does_not_mark_an_interrupted_automatic_run_finished(runne
     combined = acc.combine(attempts, warnings)
     assert combined['verdict'] == 'incomplete' and combined['state'] == 'interrupted'
     assert combined['counts']['pass'] == 1 and combined['counts']['manual-pass'] == 2
+
+
+# covers: delivery.acceptance/E6
+def test_known_retry_failures_remain_failures_when_the_original_file_is_missing(attempts):
+    _, retry = attempts
+    retry['scenarios'][0]['status'] = 'fail'
+    combined = acc.combine([(Path('missing.json'), {'missing': True}), (Path('retry.json'), retry)], ['first file missing'])
+    assert combined['verdict'] == 'fail'
+    assert combined['counts']['fail'] == 1
+    assert combined['failures'][0]['serial'] == 'TEST'
+    assert 'initial-missing' in combined['reasons']
+    text = acc.conclusion_text(combined)
+    assert '未通过' in text and '首次报告缺失' in text
+
+
+# covers: delivery.acceptance/E6
+def test_a_failure_on_the_second_phone_is_not_hidden_by_the_first_phones_pass(attempts):
+    first, retry = attempts
+    first['scenarios'][0]['status'] = 'pass'
+    retry['device']['serial'] = 'SECOND-PHONE'
+    retry['scenarios'][0]['status'] = 'fail'
+    combined = acc.combine([(Path('first.json'), first), (Path('retry.json'), retry)])
+    assert combined['verdict'] == 'fail' and combined['counts']['fail'] == 1
+    assert combined['failures'][0]['serial'] == 'SECOND-PHONE'
+    assert combined['failures'][0]['source'] == 'retry.json'
+    assert '手机 SECOND-PHONE' in acc.conclusion_text(combined)
+
+
+# covers: delivery.acceptance/E6
+def test_identity_mismatch_with_only_passes_is_incomplete_not_failed(attempts):
+    first, retry = attempts
+    first['scenarios'][0]['status'] = 'pass'
+    retry['device']['serial'] = 'SECOND-PHONE'
+    combined = acc.combine([(Path('first.json'), first), (Path('retry.json'), retry)])
+    assert combined['verdict'] == 'incomplete'
+    assert combined['counts']['fail'] == 0
+    assert not combined['failures']
+
+
+# covers: delivery.acceptance/E6
+@pytest.mark.parametrize('interrupt', [False, True])
+def test_failed_observation_is_saved_before_screenshot_can_fail_or_be_interrupted(runner, monkeypatch, interrupt):
+    def capture():
+        saved = json.loads((runner.path / 'report.json').read_text())
+        assert saved['scenarios'][0]['status'] == 'fail' and saved['verdict'] == 'fail'
+        assert saved['scenarios'][0]['details']['screenshot_error'] == '截图未完成'
+        if interrupt:
+            raise KeyboardInterrupt('stopped screenshot')
+        raise RuntimeError('screenshot unavailable')
+    monkeypatch.setattr(acc.rungic_agent, 'screenshot', capture)
+    if interrupt:
+        with pytest.raises(KeyboardInterrupt):
+            acc.run_scenarios([runner.scenario('one', 'bad'), runner.scenario('later')], out_dir=runner.path)
+    else:
+        acc.run_scenarios([runner.scenario('one', 'bad'), runner.scenario('later')], out_dir=runner.path)
+    saved = json.loads((runner.path / 'report.json').read_text())
+    assert saved['verdict'] == 'fail' and saved['scenarios'][0]['status'] == 'fail'
+    assert '截图未完成' in saved['scenarios'][0]['details']['screenshot_error']
+    assert saved['scenarios'][1]['status'] == ('not-run' if interrupt else 'pass')
+    assert saved['state'] == ('interrupted' if interrupt else 'finished')
+
+
+# covers: delivery.acceptance/E6
+def test_successful_screenshot_adds_evidence_after_failure_is_already_saved(runner, monkeypatch):
+    screenshot = runner.path.parent / 'fixture.png'
+    screenshot.write_bytes(b'offline screenshot fixture')
+    def capture():
+        assert json.loads((runner.path / 'report.json').read_text())['scenarios'][0]['status'] == 'fail'
+        return screenshot
+    monkeypatch.setattr(acc.rungic_agent, 'screenshot', capture)
+    report = acc.run_scenarios([runner.scenario('one', 'bad')], out_dir=runner.path)
+    details = report['scenarios'][0]['details']
+    assert Path(details['screenshot']).exists() and 'screenshot_error' not in details
+    assert json.loads(Path(report['path']).read_text())['scenarios'][0]['details'] == details
