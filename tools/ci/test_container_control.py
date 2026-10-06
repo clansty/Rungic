@@ -78,7 +78,7 @@ class Controller(unittest.TestCase):
         base = self.root / 'data/adb/rungic-plasma'
         executable(base / 'rungic-plasma-enter',
                    ENTER.replace('__STATE__', str(self.state)).replace('__FILES__', str(self.files)))
-        for helper in ('android-audio', 'android-device', 'android-clipboard', 'android-calls', 'rootfs-image'):
+        for helper in ('android-audio', 'android-device', 'android-media', 'android-clipboard', 'android-calls', 'rootfs-image'):
             executable(base / helper, f'#!/bin/sh\necho "{helper} $*" >> {self.state}/helpers\n')
         stubs = self.root / 'bin'
         executable(stubs / 'id', '#!/bin/sh\necho 0\n')
