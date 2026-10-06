@@ -8,7 +8,6 @@ from pathlib import Path
 import re
 import select
 import signal
-import socket
 import subprocess
 import tempfile
 import unittest
@@ -28,6 +27,7 @@ class Runtime(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.children = []
+        self.channels = []
         self.addCleanup(self.stop_children)
         self.base = self.root / 'data/adb/rungic-plasma'
         self.state = self.root / 'data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/runtime'
@@ -61,8 +61,8 @@ esac''')
  timeout) shift 2; exec "$@";;
  setsid) echo "$$" >> "$TEST_ROOT/child-pids"
  echo detached >> "$TEST_ROOT/calls"
- eval 'echo ready >&'"$TEST_CHILD_FD"
- eval 'read release <&'"$TEST_CHILD_FD";;
+ echo ready > "$TEST_ROOT/ready"
+ read release < "$TEST_ROOT/release";;
  *) exit 90;;
 esac''')
         script = ROOT / 'system/rungic-runtime'
@@ -76,30 +76,35 @@ esac''')
 
     def run_action(self, action='watch', **env):
         if action == 'start':
-            parent, child = socket.socketpair()
-            try:
-                result = subprocess.run(['sh', str(self.script), action],
-                                        env={**self.env, **env, 'TEST_CHILD_FD': str(child.fileno())},
-                                        pass_fds=(child.fileno(),), capture_output=True, text=True, timeout=10)
-            finally:
-                child.close()
-            self.assertTrue(select.select([parent], [], [], 10)[0], 'The fake child did not report readiness.')
-            self.assertEqual(parent.recv(32), b'ready\n')
+            channels = []
+            for name in ['ready', 'release']:
+                path = self.root / name
+                os.mkfifo(path)
+                channel = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+                self.channels.append(channel)
+                channels.append(channel)
+            result = subprocess.run(['sh', str(self.script), action],
+                                    env={**self.env, **env}, capture_output=True, text=True, timeout=10)
+            self.assertTrue(select.select([channels[0]], [], [], 10)[0], 'The fake child did not report readiness.')
+            self.assertEqual(os.read(channels[0], 32), b'ready\n')
             pid = int((self.root / 'child-pids').read_text().splitlines()[-1])
-            self.children.append((os.pidfd_open(pid), parent))
+            self.children.append(os.pidfd_open(pid))
             return result
         return subprocess.run(['sh', str(self.script), action], env={**self.env, **env},
                               capture_output=True, text=True, timeout=10)
 
     def stop_children(self):
         # A pidfd identifies the child even if the numeric PID changes owners.
-        for child, channel in self.children:
-            try:
-                signal.pidfd_send_signal(child, signal.SIGTERM)
-                self.assertTrue(select.select([child], [], [], 10)[0], 'The fake child did not exit.')
-            finally:
-                os.close(child)
-                channel.close()
+        try:
+            for child in self.children:
+                try:
+                    signal.pidfd_send_signal(child, signal.SIGTERM)
+                    self.assertTrue(select.select([child], [], [], 10)[0], 'The fake child did not exit.')
+                finally:
+                    os.close(child)
+        finally:
+            for channel in self.channels:
+                os.close(channel)
 
     def lines(self):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
@@ -149,6 +154,15 @@ esac''')
         self.assertTrue((self.base / 'runtime.disabled').exists())
         self.assertEqual(self.run_action('start').returncode, 0)
         self.assertFalse((self.base / 'runtime.disabled').exists())
+
+    def test_start_handshake_with_high_file_descriptors(self):
+        files = [open(os.devnull) for _ in range(20)]
+        try:
+            self.assertGreaterEqual(files[-1].fileno(), 20)
+            self.test_stop_remains_stopped_across_boot()
+        finally:
+            for stream in files:
+                stream.close()
 
     # covers: install.independent-runtime/E1
     def test_install_account_and_unlock_are_not_bypassed(self):
