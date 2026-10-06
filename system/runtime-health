@@ -14,12 +14,11 @@ for unit in plasma-kwin_wayland.service plasma-plasmashell.service rungic-voice-
     properties=$(/usr/bin/rungic-plasma-user-exec systemctl --user show "$unit" \
         -p MainPID -p ActiveState -p Result -p ExecMainCode -p ExecMainStatus -p NRestarts) || continue
     pid=$(printf '%s\n' "$properties" | sed -n 's/^MainPID=//p')
-    case "$pid" in ''|0|*[!0-9]*) continue;; esac
     main=$pid
-    candidates=$main
+    case "$pid" in ''|0|*[!0-9]*) candidates=;; *) candidates=$main;; esac
     # The upstream KWin service's MainPID is its restart wrapper. Select only
     # its direct compositor child by executable; ordinary desktop clients remain unprotected.
-    if [ "$unit" = plasma-kwin_wayland.service ]; then
+    if [ "$unit" = plasma-kwin_wayland.service ] && [ -n "$candidates" ]; then
         children=$(cat "/proc/$main/task/$main/children" 2>/dev/null) || children=
         for child in $children; do
             case "$child" in ''|*[!0-9]*) continue;; esac

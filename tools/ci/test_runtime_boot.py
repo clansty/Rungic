@@ -188,6 +188,7 @@ class CriticalProtection(unittest.TestCase):
  *rungic-voice-agent.service*) pid=333;;
  *) exit 1;;
 esac
+[ "${TEST_ZERO:-0}" != 1 ] || pid=0
 case "$*" in *'-P MainPID'*) echo "${TEST_REUSED_PID:-$pid}";;
  *) printf 'MainPID=%s\\nActiveState=active\\nResult=success\\nExecMainCode=0\\nExecMainStatus=0\\nNRestarts=0\\n' "$pid";; esac''')
             text = (ROOT / 'system/runtime-health').read_text().replace('/proc/', str(proc) + '/')
@@ -208,6 +209,8 @@ case "$*" in *'-P MainPID'*) echo "${TEST_REUSED_PID:-$pid}";;
             (proc / '111/oom_score_adj').write_text('200')
             self.assertEqual(run(TEST_REUSED_PID='444').returncode, 0)
             self.assertNotEqual((proc / '111/oom_score_adj').read_text().strip(), '-250', 'stale PID must not receive a write')
+            self.assertEqual(run(TEST_ZERO='1').returncode, 0)
+            self.assertIn('MainPID=0', (root / 'state/linux.log').read_text(), 'stopped services must still be recorded')
 
 
 if __name__ == '__main__':
