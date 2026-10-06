@@ -7,9 +7,7 @@
       "level": "smoke",
       "check": "session_ready",
       "title": "桌面合成器（KWin）和外壳（plasmashell）在运行。连续 3 次采样，进程不变。外壳已运行至少 15 秒。会话环境文件存在。不检查宿主重启后的恢复。",
-      "covers": [
-        "desktop.session/E4"
-      ]
+      "covers": []
     },
     {
       "id": "session.units",
@@ -34,10 +32,7 @@
       "level": "smoke",
       "check": "new_crashes",
       "title": "本项检查采集到的崩溃记录中，没有已知签名以外的新签名。",
-      "covers": [
-        "delivery.acceptance/E5",
-        "delivery.crash-reports/E2"
-      ]
+      "covers": []
     },
     {
       "id": "contract.platform-bridge",
@@ -201,7 +196,6 @@
       "check": "display_geometry",
       "title": "桌面看到的手机屏幕分辨率与安卓显示尺寸一致。横向和竖向都算一致。",
       "covers": [
-        "desktop.resolution-refresh/E1",
         "iface:kwin-android-host"
       ]
     },
@@ -216,7 +210,6 @@
       },
       "title": "用安卓模拟按键（`input text`）向应用抽屉的搜索框输入“Calcul”。屏幕文字识别看到输入的文字和 Calculator，没有看到 Clock。不检查输入法和屏幕键盘。",
       "covers": [
-        "desktop.android-text/E1",
         "iface:host-input"
       ]
     },
@@ -230,8 +223,6 @@
       },
       "title": "第一个摄像头节点送出 20 帧，时间戳递增。画面通过非纯色检查或像素均值变化检查。停止后，节点恢复空闲。不检查画质和实际运动变化。",
       "covers": [
-        "apps.camera/E1",
-        "apps.camera/E2",
         "iface:camera"
       ]
     },
@@ -241,9 +232,7 @@
       "check": "idle_inhibit",
       "title": "测试程序请求不要熄屏时，安卓窗口设置保持亮屏标志。程序结束后，标志撤销。开始前已设置该标志时，判为失败。不检查屏幕是否实际点亮。",
       "covers": [
-        "delivery.probes/E1",
-        "iface:kwin-android-host",
-        "desktop.power/E2"
+        "iface:kwin-android-host"
       ]
     },
     {
@@ -252,7 +241,6 @@
       "check": "audio_playback",
       "title": "约 2 秒的测试音进入默认播放输出。结束后，输出恢复空闲或挂起。不检查实际听感。",
       "covers": [
-        "apps.phone-audio/E2",
         "iface:audio"
       ]
     },
@@ -262,7 +250,6 @@
       "check": "audio_record",
       "title": "从默认录音来源采集约 2.5 秒。样本超过 1 秒，电平不为零。结束后，来源恢复空闲或挂起。不检查音质。",
       "covers": [
-        "apps.phone-audio/E3",
         "iface:audio"
       ]
     },
@@ -272,7 +259,6 @@
       "check": "rime_input",
       "title": "Rime 检查程序完成 300 次拼音组合和中文提交。聚焦 Qt 文本框后，无障碍接口能找到键盘按键。不检查在屏幕键盘上实际输入。",
       "covers": [
-        "desktop.rime/E1",
         "desktop.keyboard/E4"
       ]
     },
@@ -287,8 +273,6 @@
       },
       "title": "通过启动器按无障碍名称打开计算器，再关闭，重复 2 次。每一轮都确认三件事：进程启动，应用出现在无障碍接口里，进程退出。",
       "covers": [
-        "delivery.ui-automation/E1",
-        "desktop.shell/E2",
         "agent.dev-diagnostics/E3"
       ]
     },
@@ -297,20 +281,14 @@
       "level": "full",
       "check": "desktop_mode",
       "title": "开启桌面模式后，0 号桌面的服务、外壳进程、显示连接（socket）和浮窗进程都存在。手机上没有启用的投屏输出（CAST）。关闭后，这些都消失。桌面模式已开启时，只检查现状，不开关。",
-      "covers": [
-        "desktop-mode.on-off/E1",
-        "desktop-mode.independent-desktop/E1",
-        "desktop-mode.independent-desktop/E6"
-      ]
+      "covers": []
     },
     {
       "id": "display.mode",
       "level": "full",
       "check": "display_scale_roundtrip",
       "title": "通过显示接口修改手机输出的缩放，读回新值，再恢复原值。不检查显示设置界面。",
-      "covers": [
-        "desktop.display-size/E3"
-      ]
+      "covers": []
     },
     {
       "id": "display.refresh",
@@ -318,7 +296,6 @@
       "check": "display_refresh_policy",
       "title": "通过显示接口请求固定 60Hz，读回安卓刷新策略为 60。再请求自动，读回 0。最后恢复原策略。不检查物理刷新率。",
       "covers": [
-        "desktop.resolution-refresh/E2",
         "iface:kwin-android-host"
       ]
     },
@@ -332,7 +309,6 @@
       },
       "title": "第二个摄像头节点送出 20 帧，时间戳递增。画面通过非纯色检查或像素均值变化检查。停止后，节点恢复空闲。不检查画质和实际运动变化。",
       "covers": [
-        "apps.camera/E1",
         "iface:camera"
       ]
     },
@@ -354,11 +330,7 @@
         "seconds": 4
       },
       "title": "像用户一样点快捷设置里的“录屏”，录约 4 秒后停止。~/Videos 里出现 MP4 文件。文件能读出视频轨和音频轨。时长与录制时间相差不超过 3 秒。检查后删除文件。不检查画质和音画同步。",
-      "covers": [
-        "apps.hw-codec/E5",
-        "apps.phone-audio/E6",
-        "desktop.screen-recording/E1"
-      ]
+      "covers": []
     },
     {
       "id": "rebrand.residue",
@@ -379,9 +351,7 @@
       },
       "title": "滑动应用抽屉时，采集绘制耗时和屏幕呈现间隔。有可比较的参考时，任一项的 95 分位值变差超过 15%，判为失败。没有参考时，不比较。不检查绝对的流畅度阈值。",
       "covers": [
-        "apps.gpu/E3",
-        "delivery.acceptance/E4",
-        "desktop.host-display/E2"
+        "delivery.acceptance/E4"
       ]
     }
   ],

@@ -8,7 +8,6 @@
  "device-only apps.flatpak-gpu/E3",
  "device-only apps.krita/E2",
  "device-only apps.phone-audio/E4",
- "device-only apps.phone-audio/E6",
  "device-only apps.plasma-camera/E1",
  "device-only apps.screen-sharing/E1",
  "device-only apps.screen-sharing/E2",
@@ -40,7 +39,10 @@
  "device-only desktop.settings-app/E1",
  "device-only desktop.settings-app/E2",
  "device-only desktop.shell/E1",
- "device-only desktop.shell/E2",
  "device-only desktop.shell/E4",
- "device-only desktop.shell/E5"
+ "device-only desktop.shell/E5",
+ "untested delivery.acceptance/E5",
+ "untested desktop.android-text/E1",
+ "untested desktop.session/E4",
+ "untested desktop.shell/E2"
 ]
