@@ -751,7 +751,7 @@ features:
       - id: E5
         text: 安卓接口异常或超时时状态变为未知，不继续显示过期的“已连接”。不支持的操作明确返回 NotSupported，不伪造成功。
       - id: E6
-        text: Linux 程序的域名解析跟随安卓当前默认网络（开 VPN 时用 VPN 的 DNS）：/etc/resolv.conf 随网络变化原子更新，断网时不保留已失效的服务器。安卓侧连不上时保持原样。
+        text: Linux 程序的域名解析跟随安卓当前默认网络（开 VPN 时用 VPN 的 DNS）：/etc/resolv.conf 随网络变化原子更新。解析器任何时候都不留空：安卓侧连不上、刚开机还没有快照或一时没有默认网络时，沿用最近一次安卓给的 DNS（存在磁盘上，重启后也在）；从来没有过时用 Linux 能看到的默认网关（Wi-Fi 优先），安卓给出真实值后替换。
       - id: E7
         text: 用户手工写的 /etc/resolv.conf（没有 Rungic 标记行）或符号链接不被覆盖。
       - id: E8

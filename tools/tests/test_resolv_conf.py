@@ -32,6 +32,8 @@ def module_with(monkeypatch, tmp_path):
         module = service(monkeypatch, android.path, 'shared/platform/network-manager.py', 'android_network')
     path = tmp_path / 'resolv.conf'
     monkeypatch.setattr(module, 'RESOLV_CONF', str(path))
+    monkeypatch.setattr(module, 'LAST_DNS', str(tmp_path / 'state' / 'last-dns'))
+    monkeypatch.setattr(module, 'gateway_servers', lambda run=None: ['192.168.31.1'])
     return module, path
 
 
@@ -43,7 +45,8 @@ def test_the_default_networks_servers_are_written(monkeypatch, tmp_path):
     assert path.read_text() == f'{module.RESOLV_MARKER}\nnameserver 192.168.5.1\n'
     assert oct(path.stat().st_mode & 0o777) == '0o644'
     assert module.sync_resolv_conf(snapshot(WIFI)) == 'unchanged'
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['resolv.conf']   # no temporary file left
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['resolv.conf', 'state']   # no temporary file left
+    assert (tmp_path / 'state' / 'last-dns').read_text() == '192.168.5.1\n', 'kept for the next start'
 
 
 # covers: desktop.network/E6
@@ -67,12 +70,40 @@ def test_a_vpn_takes_over_and_its_server_goes_with_it(monkeypatch, tmp_path):
 
 
 # covers: desktop.network/E6
-def test_offline_keeps_no_stale_server(monkeypatch, tmp_path):
+def test_no_default_network_for_a_moment_keeps_the_servers(monkeypatch, tmp_path):
+    # 2026-10-06: after a reboot with a VPN the resolver was left without a server, and Codex and Raft
+    # were offline. Android without a default network for a moment keeps the last servers.
     module, path = module_with(monkeypatch, tmp_path)
     module.sync_resolv_conf(snapshot(VPN))
-    module.sync_resolv_conf(snapshot({**WIFI, 'default': False}))   # no default network
+    assert module.sync_resolv_conf(snapshot({**WIFI, 'default': False})) == 'unchanged'
+    assert 'nameserver 172.19.0.2' in path.read_text()
+
+
+# covers: desktop.network/E6
+def test_a_restart_before_android_answers_gets_the_last_servers_never_none(monkeypatch, tmp_path):
+    module, path = module_with(monkeypatch, tmp_path)
+    module.sync_resolv_conf(snapshot(VPN))
+    path.write_text(module.RESOLV_PLACEHOLDER + '\n')               # the image's file, e.g. a new rootfs
+    assert module.sync_resolv_conf(None) == 'written'               # Android cannot be asked yet
     text = path.read_text()
-    assert text.startswith(module.RESOLV_MARKER) and 'nameserver' not in text
+    assert text.startswith(module.RESOLV_MARKER) and 'nameserver 172.19.0.2' in text
+    # Never any servers from Android: the default gateway Linux sees, until Android gives some.
+    (tmp_path / 'state' / 'last-dns').unlink()
+    path.write_text('')
+    assert module.sync_resolv_conf(None) == 'written'
+    assert 'nameserver 192.168.31.1' in path.read_text()
+    assert module.sync_resolv_conf(snapshot(WIFI)) == 'written'
+    assert 'nameserver 192.168.5.1' in path.read_text() and '192.168.31.1' not in path.read_text()
+
+
+# covers: desktop.network/E6
+def test_the_gateway_is_read_from_the_routes_wifi_first(monkeypatch, tmp_path):
+    import types
+    module, _path = module_with(monkeypatch, tmp_path)
+    routes = ('default via 10.0.0.1 dev rmnet_data0 table 1020\n'
+              'default via 192.168.31.1 dev wlan0 table 1017 proto static\n')
+    assert module.real_gateway_servers(lambda *a, **k: types.SimpleNamespace(stdout=routes)) == ['192.168.31.1']
+    assert module.real_gateway_servers(lambda *a, **k: types.SimpleNamespace(stdout='')) == []
 
 
 # covers: desktop.network/E6
@@ -100,7 +131,7 @@ def test_a_file_edited_by_hand_is_left_alone(monkeypatch, tmp_path):
 def test_the_service_writes_on_each_snapshot_and_not_without_one(monkeypatch, tmp_path):
     module, path = module_with(monkeypatch, tmp_path)
     bridge = module.Bridge(Bus())                                    # publish(None): Android not reachable
-    assert not path.exists()
+    assert 'nameserver 192.168.31.1' in path.read_text(), 'never left without a server'
     bridge.publish(snapshot(VPN))
     assert 'nameserver 172.19.0.2' in path.read_text()
     bridge.publish(None)                                             # unreachable again: keep what is there
