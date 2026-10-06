@@ -6,6 +6,9 @@ The production shell runs whole. No phone, process killing, or host systemd is u
 import os
 from pathlib import Path
 import re
+import select
+import signal
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -24,6 +27,8 @@ class Runtime(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.children = []
+        self.addCleanup(self.stop_children)
         self.base = self.root / 'data/adb/rungic-plasma'
         self.state = self.root / 'data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/runtime'
         self.state.mkdir(parents=True)
@@ -54,7 +59,10 @@ if [ "${TEST_TICKS:-0}" -gt 0 ] && [ "$n" -ge "$TEST_TICKS" ]; then rm -f "$TEST
 esac''')
         executable(self.root / 'data/adb/magisk/busybox', '''case "$1" in
  timeout) shift 2; exec "$@";;
- setsid) echo detached >> "$TEST_ROOT/calls";;
+ setsid) echo "$$" >> "$TEST_ROOT/child-pids"
+ echo detached >> "$TEST_ROOT/calls"
+ eval 'echo ready >&'"$TEST_CHILD_FD"
+ eval 'read release <&'"$TEST_CHILD_FD";;
  *) exit 90;;
 esac''')
         script = ROOT / 'system/rungic-runtime'
@@ -67,8 +75,31 @@ esac''')
         self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}', TEST_ROOT=str(self.root))
 
     def run_action(self, action='watch', **env):
+        if action == 'start':
+            parent, child = socket.socketpair()
+            try:
+                result = subprocess.run(['sh', str(self.script), action],
+                                        env={**self.env, **env, 'TEST_CHILD_FD': str(child.fileno())},
+                                        pass_fds=(child.fileno(),), capture_output=True, text=True, timeout=10)
+            finally:
+                child.close()
+            self.assertTrue(select.select([parent], [], [], 10)[0], 'The fake child did not report readiness.')
+            self.assertEqual(parent.recv(32), b'ready\n')
+            pid = int((self.root / 'child-pids').read_text().splitlines()[-1])
+            self.children.append((os.pidfd_open(pid), parent))
+            return result
         return subprocess.run(['sh', str(self.script), action], env={**self.env, **env},
                               capture_output=True, text=True, timeout=10)
+
+    def stop_children(self):
+        # A pidfd identifies the child even if the numeric PID changes owners.
+        for child, channel in self.children:
+            try:
+                signal.pidfd_send_signal(child, signal.SIGTERM)
+                self.assertTrue(select.select([child], [], [], 10)[0], 'The fake child did not exit.')
+            finally:
+                os.close(child)
+                channel.close()
 
     def lines(self):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
