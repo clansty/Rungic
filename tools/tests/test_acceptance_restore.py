@@ -174,5 +174,5 @@ def test_the_report_and_its_manual_items(tmp_path, monkeypatch):
     saved = json.loads(path.read_text())
     assert saved['failed_ids'] == ['a.bad'] and saved['passed'] is False
     manual = ' '.join(saved['manual']).lower()
-    for item in ('image quality', 'acoustic', 'synchronisation', 'pinyin', 'casting'):
+    for item in ('画质', '音质', '同步', '拼音', '投屏'):
         assert item in manual, item
