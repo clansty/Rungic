@@ -57,16 +57,18 @@ def test_device_request_succeeds_without_any_ui_socket(tmp_path, monkeypatch, op
 # covers: desktop.host-bridges/E4 desktop.sms/E2 desktop.sms/E4
 # covers[consumer]: iface:telephony
 @pytest.mark.parametrize('reply,exception', [(None, ConnectionError), (b'{"status":"sent"}', ConnectionError),
-                                            (b'[]\n', ValueError), (b'x' * 129 + b'\n', ValueError)])
+                                            (b'[]\n', ValueError), (b'x' * 129 + b'\n', transport.ResponseTooLarge)])
 def test_ambiguous_submission_never_falls_back_to_a_live_ui(tmp_path, monkeypatch, reply, exception):
     backend = Backend(tmp_path / 'device', reply)
     ui = socket.socket(socket.AF_UNIX)
     ui.bind(str(tmp_path / 'ui')); ui.listen(4); ui.settimeout(0.05)
     monkeypatch.setenv('RUNGIC_DEVICE_SOCKET', backend.path)
     try:
-        with pytest.raises(exception):
+        with pytest.raises(exception) as raised:
             transport.request({'op': 'sms', 'action': 'send', 'to': '10000', 'text': 'test'},
                               ui_socket=str(tmp_path / 'ui'), limit=128)
+        if exception is transport.ResponseTooLarge:
+            assert isinstance(raised.value, ValueError)
         assert len(backend.requests) == 1
         with pytest.raises(TimeoutError):
             ui.accept()

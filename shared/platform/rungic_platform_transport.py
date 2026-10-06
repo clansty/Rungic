@@ -17,6 +17,10 @@ DEVICE_OPS = frozenset(('network-get', 'wifi', 'network-wifi', 'bluetooth', 'tel
 DEVICE_TOPICS = frozenset(('network', 'bluetooth', 'telephony'))
 
 
+class ResponseTooLarge(ValueError):
+    """The backend response exceeds the caller's size limit."""
+
+
 def endpoint(data, ui_socket=None):
     ui = ui_socket or os.environ.get('RUNGIC_PLATFORM_SOCKET', UI_DEFAULT)
     device = data.get('op') in DEVICE_OPS
@@ -55,7 +59,7 @@ def request(data, timeout=4, *, ui_socket=None, limit=524288):
                 raise ConnectionError('Device backend disconnected; outcome may be unknown, do not retry automatically')
             raw.extend(part)
             if len(raw) > limit:
-                raise ValueError('Device response too large')
+                raise ResponseTooLarge('Device response too large')
     result = json.loads(raw.split(b'\n', 1)[0])
     if not isinstance(result, dict):
         raise ValueError('Invalid device response: expected an object')

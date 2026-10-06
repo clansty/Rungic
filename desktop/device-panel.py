@@ -122,6 +122,8 @@ class DeviceApp(Adw.Application):
         future=self.pool.submit(request, data)
         def done(f):
             try: f.result(); message=''
+            except rungic_platform_transport.ResponseTooLarge:
+                message=_('The Android host sent a response that is too large')
             except Exception as e: message=str(e)
             GLib.idle_add(self.show_message, message)
         future.add_done_callback(done)
@@ -171,6 +173,8 @@ class DeviceApp(Adw.Application):
         future=self.pool.submit(read)
         def done(f):
             try:data,error=f.result(),None
+            except rungic_platform_transport.ResponseTooLarge:
+                data,error=None,_('The Android host sent a response that is too large')
             except OSError:data,error=None,_('Cannot reach the Android side. Open Rungic on the phone.')
             except Exception as e:data,error=None,str(e)
             GLib.idle_add(self.update, data, error)
