@@ -39,12 +39,12 @@ final class PlatformBridge implements Closeable {
         });
     }
     private final AndroidClipboardBridge clipboard=new AndroidClipboardBridge();
-    private final CaptureBridge capture;
+    private final MediaLink capture;
     private final OcrBridge ocr;
     private final AndroidDeviceBridge device=new AndroidDeviceBridge();
     private final java.util.concurrent.ExecutorService deviceClients=new java.util.concurrent.ThreadPoolExecutor(0,8,30,TimeUnit.SECONDS,
         new java.util.concurrent.SynchronousQueue<Runnable>(),new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
-    PlatformBridge(Activity activity,CaptureBridge capture) { this.activity=activity;this.capture=capture;path=new File(activity.getFilesDir(),"tmp/platform.sock");ocr=new OcrBridge(activity); }
+    PlatformBridge(Activity activity,MediaLink capture) { this.activity=activity;this.capture=capture;path=new File(activity.getFilesDir(),"tmp/platform.sock");ocr=new OcrBridge(activity); }
     void start() throws IOException {
         if(running)return;
         path.delete();

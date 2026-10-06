@@ -123,22 +123,24 @@ def test_execution_is_owned_by_the_user_manager_and_preserves_the_login_environm
     assert 'enable-linger' in dict(keepalive['Service'])['ExecStart']
 
 
-def supervisor(tmp_path, group='0::/\n', rc=1):
-    """Run the production watcher with every Android filesystem/command redirected to a sandbox."""
-    base, state, proc = tmp_path / 'base', tmp_path / 'state', tmp_path / 'proc'
-    for path in (base, state, proc / 'self', tmp_path / 'bin'):
+def supervisor(tmp_path, group='0::/\n', rc=1, name='android-device'):
+    """Run the production watcher with every Android filesystem/command redirected to a sandbox,
+    installed as `name` (android-device or android-media: the same script, docs/117)."""
+    base, states, proc = tmp_path / 'base', tmp_path / 'state', tmp_path / 'proc'
+    state = states / name.removeprefix('android-')
+    for path in (base, states, proc / 'self', tmp_path / 'bin'):
         path.mkdir(parents=True)
-    (base / 'device.enabled').touch()
+    (base / (name.removeprefix('android-') + '.enabled')).touch()
     (proc / 'self/cgroup').write_text(group)
     text = (ROOT / 'system/android-device').read_text()
     text = text.replace('/data/adb/rungic-plasma', str(base)).replace(
-        '/data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/device', str(state))
+        '/data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/', str(states) + '/')
     text = text.replace('/proc/', str(proc) + '/')
     for mount in ('/sys/fs/cgroup', '/dev/memcg', '/dev/cpuctl', '/dev/stune'):
         path = tmp_path / mount.lstrip('/'); path.mkdir(parents=True)
         (path / 'cgroup.procs').touch()
         text = text.replace(mount, str(path))
-    script = tmp_path / 'watcher'; script.write_text(text)
+    script = tmp_path / name; script.write_text(text)
     calls = tmp_path / 'calls'
     commands = {'id': 'echo 0', 'stat': 'echo 10000', 'pm': 'echo package:/tmp/candidate.apk',
                 'app_process': f'echo launch >> "{calls}"; echo PRIVATE-CONTENT; exit {rc}',
@@ -151,8 +153,9 @@ def supervisor(tmp_path, group='0::/\n', rc=1):
 
 
 # covers: desktop.host-bridges/E5
-def test_supervisor_has_finite_recovery_without_container_restarts_or_payload_logs(tmp_path):
-    result, calls, state = supervisor(tmp_path)
+@pytest.mark.parametrize('name', ['android-device', 'android-media'])
+def test_supervisor_has_finite_recovery_without_container_restarts_or_payload_logs(tmp_path, name):
+    result, calls, state = supervisor(tmp_path, name=name)
     assert result.returncode == 1
     assert calls.read_text().splitlines() == ['launch', 'delay-3', 'launch', 'delay-12', 'launch', 'delay-27',
                                              'launch', 'delay-30', 'launch']
@@ -160,6 +163,8 @@ def test_supervisor_has_finite_recovery_without_container_restarts_or_payload_lo
     assert 'restart-limit' in log and log.count('backend-exit code=1') == 5
     assert 'PRIVATE-CONTENT' not in log + result.stdout + result.stderr
     assert 'lxc-stop' not in (ROOT / 'system/android-device').read_text()
+    # Each backend its own state, flag and lock; the media backend's state reachable by the desktop user.
+    assert oct(state.stat().st_mode & 0o777) == ('0o711' if name == 'android-media' else '0o700')
 
 
 # covers: desktop.host-bridges/E5

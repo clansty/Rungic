@@ -245,3 +245,4 @@ Every feature, the experience it must give and the code, tests and documents beh
 | [113-independent-linux-services.md](113-independent-linux-services.md) | Linux user services and replaceable hardware backends: their lifetime, Android 16 root probes, what is still to check |
 | [114-task-control.md](114-task-control.md) | Stepping into work under way: words kept until they reach the task, verified stop, take over and give back in the director, work continued after a restart (2026-10-06) |
 | [115-push-to-talk-coordinator.md](115-push-to-talk-coordinator.md) | Push-to-talk on the call's voice coordinator (press mode): work starts only from the user's words, results are said out of band (2026-10-06) |
+| [117-media-backend.md](117-media-backend.md) | The microphone, cameras and phone speaker in an independent root media backend, out of the app's process: a call's audio outlives the app; the app keeps permissions, being in front and Android's call (2026-10-06) |

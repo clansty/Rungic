@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 163 条功能、711 条体验，其中 668 条有检查。
+共 163 条功能、712 条体验，其中 669 条有检查。
 
 ## Agent 能力
 
@@ -2472,13 +2472,15 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 - **E1** 安卓状态变化时，watch 在版本号变化时立即返回，服务取完整状态。没有变化时最长 60 秒兜底一次。（单元测试、人工）
 - **E2** 遇到不支持 watch 的旧 APK，服务退回原来的轮询间隔继续工作。（单元测试）
 - **E3** 各后端每次启动换 epoch，看到旧 epoch 的服务会重新取状态。平台 socket 只接受 UID 0/1000 的请求。（单元测试）
-- **E4** 网络、蓝牙、SIM 和短信经独立硬件端点。显示、触摸和相机等界面能力经显示宿主端点。（单元测试）
+- **E4** 网络、蓝牙、SIM 和短信经独立硬件端点。显示、触摸等界面能力经显示宿主端点；麦克风、相机和手机外放经独立媒体端点（E6）。（单元测试）
 - **E5** 独立后端退出后有限恢复，退出记录有界落盘。不能重启健康的容器或重放短信。（单元测试）
+- **E6** 麦克风、相机、手机外放和 Agent 通话的声音由独立媒体后端提供（root 进程，不在 App 里）。App 被隐藏、冻结或强行停止时，进行中的 Agent 通话照常进行；App 回来后重新连上。桌面的麦克风和相机仍只在用户给了 Rungic 权限、桌面在前台时使用；App 不在时按不在前台处理。（单元测试）
 
 注意：
+- root 进程用 CameraManager.openCamera 时，框架会读一项开发者设置；ActivityManager 不认识的进程读不了（SecurityException），要先预置框架里缓存它的静态字段。 [docs/117-media-backend.md](../docs/117-media-backend.md)
 - 平台桥只在 APK 私有目录，校验对端 UID。剪贴板后端走抽象 Unix socket，依赖 LXC 与安卓共享网络命名空间，仍须校验对端 UID。 [docs/research/31-backend-integration.md](../docs/research/31-backend-integration.md) [docs/research/clipboard-background.md](../docs/research/clipboard-background.md)
 
-文档：[docs/49-plasma-performance.md](../docs/49-plasma-performance.md)、[docs/research/30-feature-adaptation.md](../docs/research/30-feature-adaptation.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)
+文档：[docs/49-plasma-performance.md](../docs/49-plasma-performance.md)、[docs/research/30-feature-adaptation.md](../docs/research/30-feature-adaptation.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)、[docs/117-media-backend.md](../docs/117-media-backend.md)
 
 ### 设置与管理手机里的电脑
 

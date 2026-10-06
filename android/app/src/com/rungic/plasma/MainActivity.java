@@ -19,7 +19,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     private DisplayView display;
     private DisplayPacer pacer;
     private PlatformBridge platform;
-    private CaptureBridge capture;
+    private MediaLink capture;   // the media backend's app side (docs/117)
     private CodecBridge codecs;
     private CastDesktop castDesktop;
     /** The assistant's screen: a 1920x1080 desktop output, on the TV or in a Linux floating window. */
@@ -87,7 +87,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         display = new DisplayView();
         pacer = new DisplayPacer(display, () -> initialized,
                 this::publishDisplayInfo, worker);
-        capture = new CaptureBridge(this);
+        capture = new MediaLink(this);
         codecs = new CodecBridge(this);
         platform = new PlatformBridge(this,capture);
         display.getHolder().addCallback(this);
@@ -141,7 +141,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
             try { idleInhibitFd.close(); } catch (IOException ignored) {}
         }
         castDesktop.release();
-        try { capture.close(); } catch(IOException ignored) {}
+        capture.close();
         try { codecs.close(); } catch(IOException ignored) {}
         try { platform.close(); } catch(IOException ignored) {}
         super.onDestroy();
@@ -226,7 +226,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     }
     @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] grants) {
         super.onRequestPermissionsResult(code,permissions,grants);
-        if(code==CaptureBridge.PERMISSION_REQUEST && capture!=null)capture.permissionResult();
+        if(code==MediaLink.PERMISSION_REQUEST && capture!=null)capture.permissionResult(permissions,grants);
     }
 
     private void immersive() {

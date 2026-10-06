@@ -1,7 +1,6 @@
 package com.rungic.plasma;
 
 import android.Manifest;
-import android.app.Activity;
 import android.content.*;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
@@ -22,10 +21,35 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
-/** Private, demand-driven capture using ordinary Android camera/mic permissions. */
+/**
+ * Private, demand-driven capture with the permissions the user gave the Rungic app. It runs in
+ * the independent media backend (MediaDaemon, docs/117), not in the app: the app's process,
+ * hidden, frozen or killed, no longer ends a call's audio. What only the app can do (ask for a
+ * permission, know that the desktop is in front, Android's call and its notification) the backend
+ * asks of it through Host; without the app, the desktop counts as not in front.
+ */
 final class CaptureBridge implements Closeable {
-    static final int PERMISSION_REQUEST=9041;
-    private final Activity activity;
+    /** What the app side provides (MediaDaemon: over the link to the app, MediaLink). */
+    interface Host {
+        /** Whether the Rungic app has the runtime permission. */
+        boolean permitted(String permission);
+        /** The user refused it before (asked again only from the app's menu). */
+        boolean denied(String permission);
+        /** Asks the user in the app (in front), waits for the answer; throws when it cannot. */
+        void requestPermission(String permission) throws Exception;
+        /** The capture notification's service: what is in use, a call's included. */
+        void service(boolean microphone,boolean camera,boolean call);
+        /** Android's call for a call with the Agent (AgentCall): -> whether Telecom has it. */
+        boolean placeCall();
+        void endCall();
+        /** Android holds the call for another one, or hung it up. */
+        boolean held();
+        boolean hungUp();
+        /** Something the Linux side follows changed (capture-info, HostEvents.CAPTURE). */
+        void changed();
+    }
+    private final Host host;
+    private final Context context;
     private final File path;
     private final CameraManager cameras;
     private final ExecutorService clients=Executors.newFixedThreadPool(6);
@@ -34,7 +58,8 @@ final class CaptureBridge implements Closeable {
     // call does (2026-10-05, the user): it is a call Android knows (AgentCall), its sockets stay open
     // when the app is hidden, the capture service stays up for the whole call (Android lets only an
     // app in front start it), and a wake lock keeps the phone awake for the Linux side meanwhile.
-    // Other capture still needs Plasma in front.
+    // In this backend the call also outlives the app's process (docs/117). Other capture still needs
+    // Plasma in front.
     private final Set<LocalSocket> communicationSockets=ConcurrentHashMap.newKeySet();
     private android.os.PowerManager.WakeLock callWakeLock;
     private final Semaphore slots=new Semaphore(6);
@@ -43,58 +68,37 @@ final class CaptureBridge implements Closeable {
     private final AtomicBoolean phoneOutputBusy=new AtomicBoolean();
     private final ConcurrentHashMap<String,CommunicationOutput> communicationOutputs=new ConcurrentHashMap<>();
     private final Object permissionLock=new Object();
-    private volatile CountDownLatch permissionResult;
     private volatile boolean visible, running;
     private volatile boolean micActive, cameraActive;
     private LocalSocket bound;
     private LocalServerSocket server;
 
-    CaptureBridge(Activity activity) {
-        this.activity=activity;path=new File(activity.getFilesDir(),"tmp/capture.sock");
-        cameras=activity.getSystemService(CameraManager.class);
+    CaptureBridge(Context context,Host host,File path) {
+        this.context=context;this.host=host;this.path=path;
+        cameras=context.getSystemService(CameraManager.class);
     }
+    /** The desktop is in front (the app says so; without the app, it is not). */
     void setVisible(boolean value) {
-        if(visible!=value)HostEvents.bump(HostEvents.CAPTURE);   // the media bridge follows it (HostEvents)
+        if(visible!=value)host.changed();   // the media bridge follows it (capture-info)
         visible=value;
         if(!value) {
             for(LocalSocket socket:sockets)if(!communicationSockets.contains(socket))try { socket.close(); } catch(IOException ignored) {}
-            CountDownLatch latch=permissionResult;if(latch!=null)latch.countDown();
         }
-    }
-    void permissionResult() { HostEvents.bump(HostEvents.CAPTURE);CountDownLatch latch=permissionResult;if(latch!=null)latch.countDown(); }
-    void requestPermissionsFromUser() {
-        activity.getPreferences(Activity.MODE_PRIVATE).edit().remove("denied-camera").remove("denied-microphone").apply();
-        HostEvents.bump(HostEvents.CAPTURE);
-        ArrayList<String> required=new ArrayList<>();
-        for(String permission:new String[]{Manifest.permission.CAMERA,Manifest.permission.RECORD_AUDIO})
-            if(activity.checkSelfPermission(permission)!=PackageManager.PERMISSION_GRANTED)required.add(permission);
-        if(!required.isEmpty())activity.requestPermissions(required.toArray(new String[0]),PERMISSION_REQUEST);
-        else android.widget.Toast.makeText(activity,R.string.capture_permissions_on,android.widget.Toast.LENGTH_SHORT).show();
     }
     private void ensurePermission(String permission) throws Exception {
         synchronized(permissionLock) {
-            if(activity.checkSelfPermission(permission)==PackageManager.PERMISSION_GRANTED)return;
+            if(host.permitted(permission))return;
             if(!visible)throw new IOException("请先返回 Plasma Mobile");
-            String key=permission.equals(Manifest.permission.CAMERA)?"denied-camera":"denied-microphone";
-            if(activity.getPreferences(Activity.MODE_PRIVATE).getBoolean(key,false))throw new SecurityException("请在 Plasma Mobile菜单中开启麦克风与相机权限");
-            CountDownLatch latch=new CountDownLatch(1);permissionResult=latch;
-            activity.runOnUiThread(() -> activity.requestPermissions(new String[]{permission},PERMISSION_REQUEST));
-            try { latch.await(45,TimeUnit.SECONDS); } finally { permissionResult=null; }
+            if(host.denied(permission))throw new SecurityException("请在 Plasma Mobile菜单中开启麦克风与相机权限");
+            host.requestPermission(permission);
             if(!visible)throw new IOException("采集已暂停，请返回 Plasma Mobile");
-            if(activity.checkSelfPermission(permission)!=PackageManager.PERMISSION_GRANTED) {
-                activity.getPreferences(Activity.MODE_PRIVATE).edit().putBoolean(key,true).apply();
-                HostEvents.bump(HostEvents.CAPTURE);
-                throw new SecurityException("采集权限未授予");
-            }
+            if(!host.permitted(permission))throw new SecurityException("采集权限未授予");
         }
     }
-    private void captureState(boolean mic,boolean active) throws Exception {
-        FutureTask<Void> change=new FutureTask<>(() -> {
-            if(active && !visible && !(mic && inCall()))throw new IOException("请先返回 Plasma Mobile");
-            if(mic)micActive=active;else cameraActive=active;
-            updateCaptureService();
-            return null;
-        });activity.runOnUiThread(change);change.get(2,TimeUnit.SECONDS);
+    private synchronized void captureState(boolean mic,boolean active) throws Exception {
+        if(active && !visible && !(mic && inCall()))throw new IOException("请先返回 Plasma Mobile");
+        if(mic)micActive=active;else cameraActive=active;
+        updateCaptureService();
     }
     private boolean inCall() { return !communicationOutputs.isEmpty(); }
     /** The capture service (the notification Android shows) for what is in use; during a call the
@@ -106,42 +110,39 @@ final class CaptureBridge implements Closeable {
         // muted call, unmuted with the screen locked, asked for the same service again.
         if(mic==serviceMic && cameraActive==serviceCamera && call==serviceCall)return;
         serviceMic=mic;serviceCamera=cameraActive;serviceCall=call;
-        if(mic || cameraActive) {
-            Intent intent=new Intent(activity,CaptureService.class).putExtra("microphone",mic).putExtra("camera",cameraActive).putExtra("call",call);
-            activity.startForegroundService(intent);
-        } else activity.stopService(new Intent(activity,CaptureService.class));
+        host.service(mic,cameraActive,call);
     }
-    /** The call started or ended: Telecom's call, the service and the wake lock follow (on the UI thread). */
+    /** The app came back: it shows the service again (its notification went with its process). */
+    synchronized void showService() {
+        serviceMic=serviceCamera=serviceCall=false;updateCaptureService();
+    }
+    /** The call started or ended: Telecom's call, the service and the wake lock follow. */
     private boolean callOpen;
-    private void callChanged() {
-        FutureTask<Void> change=new FutureTask<>(() -> {
-            if(inCall()!=callOpen) {
-                callOpen=inCall();
-                if(!callOpen)AgentCall.end();       // placed by communicationOutput
-            }
-            updateCaptureService();
-            android.os.PowerManager power=activity.getSystemService(android.os.PowerManager.class);
-            if(inCall() && callWakeLock==null) {
-                callWakeLock=power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK,"rungic:agent-call");
-                callWakeLock.acquire(4*60*60*1000L);     // a bound, should the call's end be missed
-            } else if(!inCall() && callWakeLock!=null) {
-                if(callWakeLock.isHeld())callWakeLock.release();
-                callWakeLock=null;
-            }
-            return null;
-        });activity.runOnUiThread(change);
-        try { change.get(2,TimeUnit.SECONDS); } catch(Exception ignored) {}
+    private synchronized void callChanged() {
+        if(inCall()!=callOpen) {
+            callOpen=inCall();
+            if(!callOpen)host.endCall();       // placed by communicationOutput
+        }
+        updateCaptureService();
+        android.os.PowerManager power=context.getSystemService(android.os.PowerManager.class);
+        if(inCall() && callWakeLock==null) {
+            callWakeLock=power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK,"rungic:agent-call");
+            callWakeLock.acquire(4*60*60*1000L);     // a bound, should the call's end be missed
+        } else if(!inCall() && callWakeLock!=null) {
+            if(callWakeLock.isHeld())callWakeLock.release();
+            callWakeLock=null;
+        }
     }
     private JSONArray cameraList;
     JSONObject info() throws Exception {
         // The phone's cameras do not change: listed once, not on every request (the media bridge
         // asked every second, a camera service round trip per camera each time).
         if(cameraList==null)cameraList=listCameras();
-        return new JSONObject().put("version",1).put("visible",visible).put("microphonePermission",activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED)
+        return new JSONObject().put("version",1).put("visible",visible).put("microphonePermission",host.permitted(Manifest.permission.RECORD_AUDIO))
             .put("microphoneActive",micActive).put("cameraActive",cameraActive)
-            .put("cameraPermission",activity.checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)
-            .put("cameraDenied",activity.getPreferences(Activity.MODE_PRIVATE).getBoolean("denied-camera",false))
-            .put("microphoneDenied",activity.getPreferences(Activity.MODE_PRIVATE).getBoolean("denied-microphone",false))
+            .put("cameraPermission",host.permitted(Manifest.permission.CAMERA))
+            .put("cameraDenied",host.denied(Manifest.permission.CAMERA))
+            .put("microphoneDenied",host.denied(Manifest.permission.RECORD_AUDIO))
             .put("communication",new JSONObject().put("version",1).put("active",!communicationOutputs.isEmpty()).put("aecAvailable",AcousticEchoCanceler.isAvailable()).put("playbackCursor",true)).put("cameras",cameraList);
     }
     private JSONArray listCameras() throws Exception {
@@ -204,6 +205,8 @@ final class CaptureBridge implements Closeable {
         JSONObject request=new JSONObject(line.toString("UTF-8"));
         try {
             String op=request.getString("op");
+            // The backend's state (the same as capture-info): also its readiness check.
+            if(op.equals("info")) { json(socket.getOutputStream(),info().put("ok",true));return; }
             // Playback follows the Linux sink, like the Termux output; only capture needs the app in front,
             // except a call's microphone and control once the call is open (communicationSockets).
             boolean call=op.equals("communication-microphone")||op.equals("communication-control");
@@ -258,7 +261,7 @@ final class CaptureBridge implements Closeable {
             while(running && (visible || communication && inCall())) {
                 int count=recorder.read(block,0,block.length,AudioRecord.READ_BLOCKING);
                 if(count<=0)throw new IOException("Microphone read failed");
-                if(communication && AgentCall.held)java.util.Arrays.fill(block,0,count,(byte)0);   // held for a phone call
+                if(communication && host.held())java.util.Arrays.fill(block,0,count,(byte)0);   // held for a phone call
                 socket.getOutputStream().write(block,0,count);
             }
         } catch(Exception e) { if(!header)json(socket.getOutputStream(),new JSONObject().put("error",e.getMessage()==null?"Microphone unavailable":e.getMessage())); }
@@ -272,7 +275,7 @@ final class CaptureBridge implements Closeable {
         }
     }
     /** An exclusive communication stream, with epochs fencing queued PCM after interruption. */
-    private static final class CommunicationOutput {
+    private final class CommunicationOutput {
         final AudioTrack track;
         long epoch=1,written;
         boolean silent;
@@ -286,9 +289,9 @@ final class CaptureBridge implements Closeable {
         synchronized JSONObject position() throws JSONException {
             // Held for another call, the Agent is not heard; hung up from Android's side, the Linux
             // session ends the call (AgentCall).
-            boolean held=AgentCall.held;
+            boolean held=host.held();
             if(held!=silent) { silent=held;track.setVolume(held?0f:1f); }
-            return new JSONObject().put("ok",true).put("epoch",epoch).put("hungUp",AgentCall.hungUp).put("held",held)
+            return new JSONObject().put("ok",true).put("epoch",epoch).put("hungUp",host.hungUp()).put("held",held)
                 .put("playedFrames",Integer.toUnsignedLong(track.getPlaybackHeadPosition())).put("writtenFrames",written).put("rate",48000);
         }
         synchronized JSONObject flush(long generation) throws Exception {
@@ -305,23 +308,16 @@ final class CaptureBridge implements Closeable {
     private void communicationOutput(LocalSocket socket,String session) throws Exception {
         communicationSession(session);audioPriority();
         if(!phoneOutputBusy.compareAndSet(false,true))throw new IOException("Phone output busy");
-        AudioManager audio=activity.getSystemService(AudioManager.class);AudioTrack track=null;
-        boolean header=false,modeSet=false,telecom=false;int oldMode=audio.getMode();
+        AudioManager audio=context.getSystemService(AudioManager.class);AudioTrack track=null;
+        boolean header=false,telecom=false;int oldMode=audio.getMode();
         CommunicationOutput stream=null;
         try {
             if(!visible)throw new IOException("Open Plasma before starting communication audio");
             if(oldMode!=AudioManager.MODE_NORMAL)throw new IOException("A phone call is using communication audio");
-            // A call Android knows (AgentCall): Telecom sets the mode and the route. Without it, as before.
-            telecom=AgentCall.start(activity,2000);
-            if(!telecom) { audio.setMode(AudioManager.MODE_IN_COMMUNICATION);modeSet=true; }
-            int[] order={AudioDeviceInfo.TYPE_WIRED_HEADSET,AudioDeviceInfo.TYPE_USB_HEADSET,AudioDeviceInfo.TYPE_BUILTIN_SPEAKER};
-            if(!telecom)for(int type:order) {
-                boolean selected=false;
-                for(AudioDeviceInfo device:audio.getAvailableCommunicationDevices())if(device.getType()==type) {
-                    selected=audio.setCommunicationDevice(device);if(selected)break;
-                }
-                if(selected)break;
-            }
+            // A call Android knows (AgentCall, in the app): Telecom sets the mode and the route.
+            // Without it, the backend does (communicationMode).
+            telecom=host.placeCall();
+            if(!telecom)communicationMode(audio);
             int min=AudioTrack.getMinBufferSize(48000,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT);
             if(min<0)throw new IOException("Communication output format unavailable");
             track=new AudioTrack.Builder().setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -329,7 +325,7 @@ final class CaptureBridge implements Closeable {
                 .setAudioFormat(new AudioFormat.Builder().setSampleRate(48000).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
                 .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(Math.max(min,9600)).build();
             if(track.getState()!=AudioTrack.STATE_INITIALIZED)throw new IOException("Communication output unavailable");
-            stream=new CommunicationOutput(track);communicationOutputs.put(session,stream);HostEvents.bump(HostEvents.CAPTURE);callChanged();track.play();
+            stream=new CommunicationOutput(track);communicationOutputs.put(session,stream);host.changed();callChanged();track.play();
             json(socket.getOutputStream(),new JSONObject().put("ok",true).put("rate",48000).put("channels",1).put("format","s16le").put("version",1));header=true;
             DataInputStream in=new DataInputStream(socket.getInputStream());socket.setSoTimeout(0);
             while(running) {
@@ -344,12 +340,34 @@ final class CaptureBridge implements Closeable {
             }
         } catch(Exception e) { if(!header)json(socket.getOutputStream(),new JSONObject().put("error",e.getMessage()==null?"Communication unavailable":e.getMessage())); }
         finally {
-            if(stream!=null){communicationOutputs.remove(session,stream);HostEvents.bump(HostEvents.CAPTURE);callChanged();}
-            else if(telecom)AgentCall.end();       // placed, but the call's audio never opened
+            if(stream!=null){communicationOutputs.remove(session,stream);host.changed();callChanged();}
+            else if(telecom)host.endCall();       // placed, but the call's audio never opened
             if(track!=null) { try { track.stop(); } catch(Exception ignored) {}track.release(); }
-            if(modeSet) { audio.clearCommunicationDevice();if(audio.getMode()==AudioManager.MODE_IN_COMMUNICATION)audio.setMode(oldMode); }
+            synchronized(this) {
+                if(modeSet) { modeSet=false;audio.clearCommunicationDevice();if(audio.getMode()==AudioManager.MODE_IN_COMMUNICATION)audio.setMode(oldMode); }
+            }
             phoneOutputBusy.set(false);android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
         }
+    }
+    /** Whether this backend set the communication mode (no Telecom call, or Telecom's call went). */
+    private boolean modeSet;
+    private synchronized void communicationMode(AudioManager audio) {
+        if(modeSet)return;
+        audio.setMode(AudioManager.MODE_IN_COMMUNICATION);modeSet=true;
+        int[] order={AudioDeviceInfo.TYPE_WIRED_HEADSET,AudioDeviceInfo.TYPE_USB_HEADSET,AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLE_HEADSET,AudioDeviceInfo.TYPE_BUILTIN_SPEAKER};
+        for(int type:order) {
+            boolean selected=false;
+            for(AudioDeviceInfo device:audio.getAvailableCommunicationDevices())if(device.getType()==type) {
+                selected=audio.setCommunicationDevice(device);if(selected)break;
+            }
+            if(selected)break;
+        }
+    }
+    /** Android's call for it went with the app (killed): the call goes on, its audio mode now this
+     *  backend's, so the voice stays on the call's route and echo cancellation. */
+    void callLost() {
+        if(inCall())communicationMode(context.getSystemService(AudioManager.class));
     }
     private void communicationControl(LocalSocket socket,String session) throws Exception {
         communicationSession(session);CommunicationOutput stream=communicationOutputs.get(session);
@@ -386,7 +404,7 @@ final class CaptureBridge implements Closeable {
     private void phoneOutput(LocalSocket socket) throws Exception {
         if(!phoneOutputBusy.compareAndSet(false,true))throw new IOException("Phone output busy");
         audioPriority();
-        AudioManager audio=activity.getSystemService(AudioManager.class);
+        AudioManager audio=context.getSystemService(AudioManager.class);
         AudioTrack track=null;AudioDeviceCallback callback=null;boolean header=false;
         try {
             int min=AudioTrack.getMinBufferSize(48000,AudioFormat.CHANNEL_OUT_STEREO,AudioFormat.ENCODING_PCM_16BIT);
@@ -540,6 +558,6 @@ final class CaptureBridge implements Closeable {
     @Override public synchronized void close() throws IOException {
         running=false;setVisible(false);
         if(server!=null)server.close();if(bound!=null)bound.close();path.delete();clients.shutdownNow();
-        activity.stopService(new Intent(activity,CaptureService.class));
+        host.service(false,false,false);
     }
 }
