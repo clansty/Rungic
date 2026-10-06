@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import rungic_acceptance as acc
+import rungic_release as release_tool
 
 
 class Result:
@@ -160,6 +161,14 @@ def test_display_scale_and_refresh_policy_are_restored(phone, monkeypatch):
 # covers: delivery.acceptance/E6
 def test_the_report_and_its_manual_items(tmp_path, monkeypatch):
     monkeypatch.setattr(acc, 'RESULTS', tmp_path / '.work/acceptance')
+    monkeypatch.setattr(release_tool, 'phone_drift', lambda against: {
+        'release': '20261001.2', 'commit': 'test-installed-sha', 'against': against,
+        'in_sync': True, 'differs': [],
+    })
+    monkeypatch.setattr(acc, 'device_snapshot', lambda: {
+        'serial': 'TEST-PHONE', 'fingerprint': 'test/fingerprint',
+        'battery': {'charging': True, 'level': 76}, 'screen': 'Awake',
+    })
     monkeypatch.setattr(acc, 'bring_to_front', lambda: {'was_in_front': True, 'in_front': True})
     monkeypatch.setattr(acc, 'rungic_agent', types.SimpleNamespace(
         screenshot=lambda: (_ for _ in ()).throw(RuntimeError('no screen'))))
@@ -172,6 +181,7 @@ def test_the_report_and_its_manual_items(tmp_path, monkeypatch):
     assert path.parent.parent == tmp_path / '.work/acceptance/20261001.2'
     assert re.fullmatch(r'\d{8}-\d{6}', path.parent.name) and path.name == 'report.json'
     saved = json.loads(path.read_text())
+    assert 'metadata_errors' not in saved
     assert saved['failed_ids'] == ['a.bad'] and saved['passed'] is False
     manual = ' '.join(saved['manual']).lower()
     for item in ('image quality', 'acoustic', 'synchronisation', 'pinyin', 'casting'):
