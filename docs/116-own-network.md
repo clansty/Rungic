@@ -20,8 +20,8 @@ Linux 有自己的网络命名空间（`lxc.net.0.type = empty`）。安卓这�
   - 出：Linux 连自己 127.0.0.1 上的端口，若安卓侧在这个端口监听（PulseAudio 的 20017 等），由 pasta 转到安卓的回环（`-T auto -U auto`）。
 - **抽象 socket**：抽象 Unix socket 属于网络命名空间。Linux 访问安卓服务用的三个（`com.rungic.device.v1`、`com.rungic.calls.v1`、`com.rungic.clipboard.v1`）由 `rungic-own-network host` 中转：在 Linux 的命名空间里监听同名 socket，连到安卓的服务。
   - 只转发 Linux 的 root 和 1000（安卓服务原本接受的就是这几个 uid）。
-  - 中转以 root 连接，所以服务端看到的 uid 与以前一样是 0。
-  - 客户端检查服务端 uid 为 0：这一点也不变。
+  - 中转以 root 连接安卓的服务，服务端接受 root。
+  - Linux 的客户端会检查服务端的 uid：设备和通话服务是 root（0），剪贴板服务是 shell（2000）。中转在 Linux 一侧的 socket 按各自的 uid 开始监听（SO_PEERCRED 取监听时的身份），客户端看到的和以前一样。第一次实机验收时剪贴板就是因为这一点失败的（中转以 root 监听，剪贴板客户端拒绝了它）。
 
 ## 怎么启动
 

@@ -44,8 +44,9 @@ STATUS = RUN + '/status.json'
 # Linux's side of the link: pasta's addresses (as user-mode networking commonly uses).
 ADDRESS, PREFIX, GATEWAY, INTERFACE = '10.0.2.15', '24', '10.0.2.2', 'eth0'
 # Android services Linux reaches on abstract sockets (rungic_platform_transport, cellular_audio,
-# clipboard): relayed from Linux's namespace to Android's.
-RELAYED = ('com.rungic.device.v1', 'com.rungic.calls.v1', 'com.rungic.clipboard.v1')
+# clipboard): relayed from Linux's namespace to Android's, each with the uid its clients check the
+# service has (DeviceDaemon and CallDaemon run as root, ClipboardDaemon as shell).
+RELAYED = {'com.rungic.device.v1': 0, 'com.rungic.calls.v1': 0, 'com.rungic.clipboard.v1': 2000}
 # The Android services accept these client uids (DeviceDaemon, CallDaemon, ClipboardDaemon: root,
 # Android system, the app); the relay connects as root, so it passes on only these.
 CLIENT_UIDS = (0, 1000)
@@ -123,13 +124,19 @@ def abstract_connect(name):
     return s
 
 
-def listen_in(netns_fd, android_fd, name):
-    """An abstract socket `name` in Linux's namespace (a socket keeps the namespace it was made in)."""
+def listen_in(netns_fd, android_fd, name, uid=0):
+    """An abstract socket `name` in Linux's namespace (a socket keeps the namespace it was made in),
+    listening as `uid`: the identity its clients see (SO_PEERCRED is taken at listen). Before any
+    thread starts: the effective uid is the whole process's."""
     os.setns(netns_fd, CLONE_NEWNET)
     try:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind('\0' + name)
-        server.listen(16)
+        os.seteuid(uid)
+        try:
+            server.listen(16)
+        finally:
+            os.seteuid(0)
     finally:
         os.setns(android_fd, CLONE_NEWNET)
     return server
@@ -186,12 +193,13 @@ def host(app_uid):
     status = {'appUid': app_uid, 'started': time.time(), 'pasta': None, 'restarts': 0, 'relays': []}
     android_fd = os.open('/proc/self/ns/net', os.O_RDONLY)
     netns_fd = os.open(NETNS, os.O_RDONLY)
-    for name in RELAYED:
+    servers = {}
+    for name, uid in RELAYED.items():
         try:
-            server = listen_in(netns_fd, android_fd, name)
+            servers[name] = listen_in(netns_fd, android_fd, name, uid)
         except OSError as error:
             log('relay', name, 'not set up:', error)
-            continue
+    for name, server in servers.items():
         threading.Thread(target=serve_relay, args=(server, name), daemon=True).start()
         status['relays'].append(name)
     # pasta opens /dev/net/tun in Linux's /dev, which its systemd may still be populating.

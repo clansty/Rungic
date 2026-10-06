@@ -59,6 +59,16 @@ def test_a_relay_passes_on_root_and_the_user_and_refuses_others(monkeypatch):
 
 
 # covers: desktop.network/E9
+def test_each_relay_has_the_identity_its_clients_check():
+    relayed = load().RELAYED
+    assert relayed == {'com.rungic.device.v1': 0, 'com.rungic.calls.v1': 0, 'com.rungic.clipboard.v1': 2000}
+    for path, expected in (('shared/platform/rungic_platform_transport.py', 'if uid != 0'),
+                           ('agent/assistant/cellular_audio.py', 'if uid != 0'),
+                           ('shared/platform/clipboard.py', 'if uid!=2000')):
+        assert expected in (ROOT / path).read_text(), path
+
+
+# covers: desktop.network/E9
 def test_status_reads_pastas_default_route():
     module = load()
     gateway = format(struct.unpack('<I', socket.inet_aton('10.0.2.2'))[0], '08X')
