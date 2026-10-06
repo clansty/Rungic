@@ -9,6 +9,7 @@ The test reads what NetworkManager, BlueZ and ModemManager clients read over D-B
 """
 import json
 import os
+import select
 import shutil
 import socket
 import subprocess
@@ -112,10 +113,24 @@ class Host:
 
 @pytest.fixture(scope='module')
 def bus():
-    test_bus = Gio.TestDBus.new(Gio.TestDBusFlags.NONE)
-    test_bus.up()
-    yield test_bus.get_bus_address()
-    test_bus.down()
+    daemon = subprocess.Popen(['dbus-daemon', '--session', '--nofork', '--print-address=1'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert select.select([daemon.stdout], [], [], 10)[0], 'The private D-Bus daemon did not report readiness.'
+        address = daemon.stdout.readline().strip()
+        assert address, 'The private D-Bus daemon did not publish an address.'
+        yield address
+    finally:
+        daemon.terminate()
+        try:
+            daemon.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait()
+            raise
+        finally:
+            daemon.stdout.close()
+            daemon.stderr.close()
 
 
 class Service:
