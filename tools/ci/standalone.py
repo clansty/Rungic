@@ -79,16 +79,16 @@ def write_removal_report(path, result):
     write(path, result)
     title = '只读预览' if result.get('plan_only') else ('范围内卸载完成' if result.get('complete') else '卸载未完成')
     lines = ['# Rungic 卸载报告', '', title, '',
-             f"设备：{result.get('serial', '未确认')}；ADB 端口：{result.get('adb_port', '未确认')}。",
-             '默认保留当前 Linux 家目录。只有显式 --purge 才永久删除它；历史保留资料始终保留。', '',
+             f"设备：{result.get('serial', '未确认')}。ADB 端口：{result.get('adb_port', '未确认')}。",
+             '默认保留当前 Linux 家目录。只有显式 --purge 才永久删除它。以前保留的家目录始终保留。', '',
              '本报告不证明首装、重启后的旧种子拦截或完整候选质量通过。', '']
     lines += ['当前模式：' + ('--purge，永久删除当前 Linux 家目录，不能恢复。' if result.get('purge') else '保留当前 Linux 家目录。'),
               '开始时间：' + result.get('started_at', '未进入执行计划') + '。', '']
     before = result.get('before', {})
     if before:
         lines += ['安装前实际版本：`' + before.get('release', '未找到独立发布描述符') + '`。',
-                  'APK 版本：' + '；'.join(before.get('apk_versions', [])),
-                  '底座与内核：' + '；'.join(before.get('base', [])), '']
+                  'APK 版本：' + '。'.join(before.get('apk_versions', [])),
+                  '底座与内核：' + '。'.join(before.get('base', [])), '']
     if result.get('error'):
         lines += ['失败原因：' + result['error'], '']
     if result.get('readback_error'):
@@ -96,19 +96,22 @@ def write_removal_report(path, result):
     if 'preserved_home' in result:
         lines += ['保留位置：`' + result['preserved_home'] + '`。移动后已核对原家目录 inode。', '']
     if 'preflight' in result:
+        display = {'paths': '受保护路径', 'processes': '相关进程', 'mounts': '挂载点',
+                   'images': 'loop／dm 设备', 'home': '家目录挂载',
+                   'PASS': '通过', 'BLOCKED': '阻塞', 'UNKNOWN': '未知'}
         lines += ['## 只读预检', '', result['preflight_note'], '',
-                  '按当前现场，如果不先解除条件，检查会阻塞在：' + (result['would_stop_at'] or '未发现阻塞项') + '。', '',
+                  '按当前现场，如果不先解除条件，检查会阻塞在：' + (display.get(result['would_stop_at'], result['would_stop_at']) if result['would_stop_at'] else '未发现阻塞项') + '。', '',
                   '| 检查 | 当前结果 | 原因 |', '| --- | --- | --- |']
         for entry in result['preflight']:
-            lines.append(f"| {entry['name']} | {entry['state']} | {entry['reason']} |")
+            lines.append(f"| {display.get(entry['name'], entry['name'])} | {display.get(entry['state'], entry['state'])} | {entry['reason']} |")
         lines.append('')
     lines += ['## 删除范围', '', '| 路径 | 操作结果 | 独立读回 |', '| --- | --- | --- |']
     operations = {'deleted': '删除脚本报告已删除', 'absent': '删除脚本报告原本不存在',
-                  'failed_attempt': '已尝试，未报告删除成功', 'not_attempted': '未尝试删除'}
+                  'failed_attempt': '已尝试删除，删除脚本没有报告成功', 'not_attempted': '未尝试删除'}
     observations = {'absent': '确认不存在', 'present': '仍然存在', 'unknown': '读回未完成，未确认'}
     for entry in result['path_results']:
         lines.append(f"| `{entry['path']}` | {operations[entry['operation']]} | {observations[entry['readback']]} |")
-    lines += ['', '停止服务可能改变运行状态；“未尝试删除”不表示运行状态完全未变。', '',
+    lines += ['', '停止服务可能改变运行状态。“未尝试删除”不表示运行状态完全未变。', '',
               '## 明确保留', '', '| 路径 | 原因 |', '| --- | --- |']
     for target, reason in result.get('expected_retained', {}).items():
         lines.append(f'| `{target}` | {reason} |')
@@ -116,11 +119,11 @@ def write_removal_report(path, result):
         lines += ['', '## 范围外残留', '', '以下项没有删除，也没有验证其内容：', '']
         lines += ['- `' + entry['path'] + '`' for entry in result['outside_scope']]
     lines += ['', '## 恢复家目录', '',
-              '新安装不会自动读取保留资料。先完成新账户创建，再停止 Linux。',
-              '确认新旧账户同名，home 路径和数字 UID/GID 一致，确认 Shared 已解除挂载。',
-              '保留新家目录作为回退，再把保留的 home 移回原 state/home 路径；不得直接覆盖正在运行的目录。',
-              '保留原所有者、权限、链接、ACL 和 SELinux 标签；核对内容与访问权限后才启动 Linux。',
-              '恢复操作须单独授权和验收，本工具不会执行恢复。', '',
+              '1. 新安装不会自动读取保留的家目录。先完成新账户创建，再停止 Linux。',
+              '2. 确认新旧账户同名，家目录路径和数字 UID/GID 一致，确认 Shared 已解除挂载。',
+              '3. 保留新家目录作为回退，再把保留的家目录移回原 state/home 家目录路径。不得直接覆盖正在运行的目录。',
+              '4. 保留原所有者、权限、链接、ACL 和 SELinux 标签。核对内容与访问权限后才启动 Linux。',
+              '5. 恢复操作须单独授权和验收，本工具不会执行恢复。', '',
               '原始现场、操作输出、失败与未尝试范围见同目录 report.json。', '']
     atomic_text(Path(path).with_suffix('.md'), '\n'.join(lines))
 
@@ -485,7 +488,7 @@ check_processes() {
         fi
         case "$command" in
             *'/data/adb/rungic-plasma/'*|*'/data/adb/rungic-lxc/'*|*'/data/adb/rungic-wfd/'*|*'com.rungic.cast.Main watch '*|*'com.rungic.plasma.MediaDaemon '*|*'com.rungic.plasma.DeviceDaemon '*|*'com.rungic.clipboard.ClipboardDaemon '*|*'com.rungic.telephony.CallDaemon '*|*'/data/data/com.termux/files/usr/tmp/rungic-plasma-audio/'*)
-                echo "相关进程仍在运行：${proc##*/}。执行会先停止服务，再复检。" >&2; return 1;;
+                echo "相关进程仍在运行：${proc##*/}。执行会先停止服务，再重新检查。" >&2; return 1;;
         esac
     done
 }
@@ -494,7 +497,7 @@ check_mounts() {
         code=0
         grep -Eq '/adb/(rungic-|\.rungic-)' "$table" 2>/dev/null || code=$?
         case "$code" in
-            0) echo '家目录或运行目录下面还有挂载点。没有删除任何内容。请先解除挂载并重试。--purge 会永久删除家目录，不能恢复；它也不能绕过挂载检查。' >&2; return 1;;
+            0) echo '家目录或运行目录下面还有挂载点。没有删除任何内容。请先解除挂载并重试。--purge 会永久删除家目录，不能恢复。它也不能绕过挂载检查。' >&2; return 1;;
             1) :;;
             *) case "$table" in
                    /proc/mounts|/proc/self/mountinfo) :;;
@@ -537,7 +540,7 @@ check_home() {
             parent=$preserved
             [ -d "$parent" ] || parent=/data/adb
             target_mount=$(mount_id "$parent") || { echo 'Cannot resolve the preservation mount.' >&2; return 2; }
-            [ "$source_mount" = "$target_mount" ] || { echo '家目录不能原地保留：目标位置跨了挂载。没有删除任何内容。请先手动备份家目录；如果不需要保留家目录，可显式加 --purge。这会永久删除家目录，不能恢复。' >&2; return 1; }
+            [ "$source_mount" = "$target_mount" ] || { echo '家目录不能原地保留：目标位置跨了挂载。没有删除任何内容。请先手动备份家目录。如果不需要保留家目录，可显式加 --purge。这会永久删除家目录，不能恢复。' >&2; return 1; }
             echo "home_mount=$source_mount preservation_mount=$target_mount"
         else
             echo "home_mount=$source_mount purge=1"
@@ -779,7 +782,7 @@ def _uninstall(args):
               'preserved_home_status': 'Not observed yet.',
               'restore': 'Stop Linux. Match the old and new account name, home path and numeric UID/GID. Keep the new home as a rollback copy. Move the preserved home to the original state/home path. Verify data, permissions and labels before starting Linux. Authorize and verify restoration separately.'}
     if args.purge:
-        result['warning'] = '--purge 永久删除当前 Linux 家目录，不能恢复。历史保留副本不在删除范围内。'
+        result['warning'] = '--purge 永久删除当前 Linux 家目录，不能恢复。以前保留的家目录不在删除范围内。'
     if not args.yes_delete:
         if args.report:
             write_removal_report(args.report / 'report.json', result)
@@ -795,7 +798,7 @@ def _uninstall(args):
         result['preflight'] = checks
         result['would_stop_at'] = next((entry['name'] for entry in checks if entry['state'] != 'PASS'), None)
         result['preflight_allowed'] = result['would_stop_at'] is None
-        result['preflight_note'] = '当前只读检查结果。执行会先停止服务并重新检查；预览不能证明停止会成功，也不申请协调锁。'
+        result['preflight_note'] = '当前只读检查结果。执行会先停止服务并重新检查。预览不能证明停止会成功，也不申请协调锁。'
         if args.report:
             (args.report / 'uninstall-root.sh').write_text(uninstall_root_script(args.purge, operation_id, stage, preview=True))
             write_removal_report(args.report / 'report.json', result)
