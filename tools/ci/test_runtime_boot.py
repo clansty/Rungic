@@ -202,6 +202,7 @@ case "$*" in *'-P MainPID'*) echo "${TEST_REUSED_PID:-$pid}";;
             self.assertEqual((proc / '444/oom_score_adj').read_text().strip(), '-250')
             self.assertEqual((proc / '555/oom_score_adj').read_text(), '200')
             initial = (root / 'state/linux.log').read_text()
+            self.assertIn('CompositorPIDs=111 444', initial)
             self.assertEqual(run().returncode, 0)
             self.assertEqual((root / 'state/linux.log').read_text(), initial, 'no log flood for unchanged services')
             (proc / '111/oom_score_adj').write_text('200')

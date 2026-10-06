@@ -13,13 +13,6 @@ for unit in plasma-kwin_wayland.service plasma-plasmashell.service rungic-voice-
     # One fixed account. systemd is the authority for identity; never use pgrep or a saved PID.
     properties=$(/usr/bin/rungic-plasma-user-exec systemctl --user show "$unit" \
         -p MainPID -p ActiveState -p Result -p ExecMainCode -p ExecMainStatus -p NRestarts) || continue
-    signature=$(printf '%s\n' "$properties" | tr '\n' ' ')
-    old=$(cat "$STATE/$unit.state" 2>/dev/null) || old=
-    if [ "$old" != "$boot $signature" ]; then
-        printf '%s boot=%s unit=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$boot" "$unit" "$signature" >> "$STATE/linux.log"
-        printf '%s\n' "$boot $signature" > "$STATE/$unit.state.tmp"
-        mv "$STATE/$unit.state.tmp" "$STATE/$unit.state"
-    fi
     pid=$(printf '%s\n' "$properties" | sed -n 's/^MainPID=//p')
     case "$pid" in ''|0|*[!0-9]*) continue;; esac
     main=$pid
@@ -33,6 +26,14 @@ for unit in plasma-kwin_wayland.service plasma-plasmashell.service rungic-voice-
             [ "$(readlink "/proc/$child/exe" 2>/dev/null)" = /usr/bin/kwin_wayland ] || continue
             candidates="$candidates $child"
         done
+    fi
+    signature=$(printf '%s\n' "$properties" | tr '\n' ' ')
+    if [ "$unit" = plasma-kwin_wayland.service ]; then signature="$signature CompositorPIDs=$candidates"; fi
+    old=$(cat "$STATE/$unit.state" 2>/dev/null) || old=
+    if [ "$old" != "$boot $signature" ]; then
+        printf '%s boot=%s unit=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$boot" "$unit" "$signature" >> "$STATE/linux.log"
+        printf '%s\n' "$boot $signature" > "$STATE/$unit.state.tmp"
+        mv "$STATE/$unit.state.tmp" "$STATE/$unit.state"
     fi
     for pid in $candidates; do
         [ -r "/proc/$pid/status" ] || continue

@@ -56,7 +56,7 @@ Persistent evidence contains lifecycle metadata only:
 
 - `state/host/runtime/host.log` and its previous file: boot identifier, container
   start/exit, retry state, exit code and memory cgroup counters.
-- `state/host/runtime/linux.log`: systemd MainPID, active state, restart count,
+- `state/host/runtime/linux.log`: systemd MainPID, selected compositor PIDs, active state, restart count,
   result and last main-process exit code. The health timer runs every 30 seconds; package configuration starts only this
   new timer on live upgrades and respects an administrator's disabled state.
 - Each critical unit's ExecStopPost callback writes a separate private log under
