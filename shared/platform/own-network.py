@@ -194,6 +194,11 @@ def host(app_uid):
             continue
         threading.Thread(target=serve_relay, args=(server, name), daemon=True).start()
         status['relays'].append(name)
+    # pasta opens /dev/net/tun in Linux's /dev, which its systemd may still be populating.
+    for _ in range(50):
+        if os.path.exists('/dev/net/tun'):
+            break
+        time.sleep(0.2)
     delay = 1
     while os.path.exists('/proc/1'):
         started = time.monotonic()
