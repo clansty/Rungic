@@ -35,6 +35,11 @@ for g in json.load(open("/usr/share/rungic/service-policy.json"))["groups"]:
             print(scope + "/" + unit + "/" + g["default"])'); do
         scope=${entry%%/*}; rest=${entry#*/}; unit=${rest%/*}; default=${rest#*/}
         grep -qxF "$scope $unit" "$state" && continue
+        # A unit another package ships (Linux's own network, rungic-plasma-bridges) may not be
+        # installed yet: not recorded, so that package applies its default when it is.
+        case $default in enabled|disabled)
+            [ -e "/usr/lib/systemd/$scope/$unit" ] || [ -e "/lib/systemd/$scope/$unit" ] || continue ;;
+        esac
         case $default in
             masked)
                 if [ ! -e "/etc/systemd/$scope/$unit" ] && [ ! -L "/etc/systemd/$scope/$unit" ]; then

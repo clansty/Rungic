@@ -1,0 +1,9 @@
+[Unit]
+Description=Hand the own-network switch to the Android side (docs/116)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rungic-own-network mode
+
+[Install]
+WantedBy=multi-user.target

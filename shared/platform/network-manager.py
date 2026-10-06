@@ -14,6 +14,7 @@ import re
 import signal
 import socket
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -42,6 +43,9 @@ RESOLV_MARKER = '# Managed by Rungic from the Android default network'
 # What the rootfs image ships (tools/ci/build_rootfs_image.py): also ours to replace.
 RESOLV_PLACEHOLDER = '# Set from Android network on first boot'
 RESOLV_MAX_SERVERS = 3  # glibc reads at most three nameservers
+# The last servers Android gave, kept across restarts: the resolver is never left without one while
+# Android cannot be asked or has no default network for a moment (a reboot with a VPN, 2026-10-06).
+LAST_DNS = '/var/lib/rungic/last-dns'
 
 
 def host_request(timeout=3.5, **request):
@@ -51,10 +55,13 @@ def host_request(timeout=3.5, **request):
     return result
 
 
-def resolv_conf_text(snapshot):
-    """/etc/resolv.conf for the default network of an Android snapshot: its DNS servers (at most
-    three, IPv6 link-local ones with their interface), or none when Android has no default network,
-    so that a stale VPN server is never kept."""
+def interface_exists(name):
+    return os.path.exists(f'/sys/class/net/{name}')
+
+
+def default_servers(snapshot):
+    """The DNS servers of the default network of an Android snapshot (at most three, IPv6
+    link-local ones with their interface), [] when Android has no default network."""
     servers = []
     for row in snapshot.get('networks', []):
         if not row.get('default'):
@@ -67,14 +74,63 @@ def resolv_conf_text(snapshot):
                 continue
             if scope and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', scope):
                 continue
+            # With its own network (docs/116) Linux has no Android interface to reach a link-local
+            # server through.
+            if scope and ip.version == 6 and ip.is_link_local and not interface_exists(scope):
+                continue
             entry = f'{ip}%{scope}' if scope and ip.version == 6 and ip.is_link_local else str(ip)
             if entry not in servers:
                 servers.append(entry)
         break
-    lines = [RESOLV_MARKER] + [f'nameserver {server}' for server in servers[:RESOLV_MAX_SERVERS]]
-    if not servers:
-        lines.append('# No default network on Android now')
+    return servers[:RESOLV_MAX_SERVERS]
+
+
+def resolv_conf_text(servers, note=''):
+    lines = [RESOLV_MARKER] + ([note] if note else []) + [f'nameserver {server}' for server in servers]
     return '\n'.join(lines) + '\n'
+
+
+def last_servers():
+    """The servers Android gave last (LAST_DNS), [] when it never gave any."""
+    try:
+        with open(LAST_DNS, encoding='utf-8') as stream:
+            return [line.strip() for line in stream if line.strip()][:RESOLV_MAX_SERVERS]
+    except OSError:
+        return []
+
+
+def remember_servers(servers):
+    if servers == last_servers():
+        return
+    try:
+        os.makedirs(os.path.dirname(LAST_DNS), exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix='.last-dns.', dir=os.path.dirname(LAST_DNS))
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            stream.write('\n'.join(servers) + '\n')
+        os.replace(temporary, LAST_DNS)
+    except OSError:
+        LOG.warning('Cannot keep the last DNS servers in %s', LAST_DNS)
+
+
+def gateway_servers(run=subprocess.run):
+    """The IPv4 default gateway Linux sees (Wi-Fi first), as a DNS server of last resort: home and
+    office routers answer DNS. [] when there is none."""
+    try:
+        out = run(['ip', '-4', 'route', 'show', 'table', 'all'], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in out.splitlines():
+        match = re.match(r'default via (\S+) dev (\S+)', line)
+        # Not pasta's gateway (Linux's own network, docs/116): it answers no DNS.
+        if match and match.groups() != ('10.0.2.2', 'eth0'):
+            found.append((0 if match.group(2).startswith('wlan') else 1, match.group(1)))
+    for _rank, gateway in sorted(found):
+        try:
+            return [str(ipaddress.IPv4Address(gateway))]
+        except ValueError:
+            continue
+    return []
 
 
 def resolv_conf_is_ours(path):
@@ -93,13 +149,38 @@ def resolv_conf_is_ours(path):
     return first in ('', RESOLV_PLACEHOLDER) and not rest
 
 
+def fallback_servers():
+    """-> (servers, note) to keep while Android gives none: the last servers it gave, else the Wi-Fi
+    gateway; never none while there is any (an empty resolver left Codex and Raft offline, 2026-10-06)."""
+    servers = last_servers()
+    if servers:
+        return servers, '# Android gives no DNS now: the last servers it gave'
+    servers = gateway_servers()
+    if servers:
+        return servers, '# Android has given no DNS yet: the default gateway'
+    return [], '# No DNS known yet'
+
+
 def sync_resolv_conf(snapshot, path=None):
-    """Write the default network's resolver configuration, atomically and only when it changes.
-    -> 'written', 'unchanged' or 'kept' (a hand-made file), or 'failed'."""
+    """Write the resolver configuration of a snapshot (None: Android cannot be asked), atomically and
+    only when it changes. -> 'written', 'unchanged' or 'kept' (a hand-made file), or 'failed'."""
     path = path or RESOLV_CONF
     if os.path.islink(path) or not resolv_conf_is_ours(path):
         return 'kept'
-    text = resolv_conf_text(snapshot)
+    servers = default_servers(snapshot) if snapshot is not None else []
+    if servers:
+        remember_servers(servers)
+        text = resolv_conf_text(servers)
+    else:
+        try:
+            with open(path, encoding='utf-8') as stream:
+                current = stream.read()
+        except OSError:
+            current = ''
+        if 'nameserver ' in current:
+            return 'unchanged'          # Android gives none now: the servers there stay
+        servers, note = fallback_servers()
+        text = resolv_conf_text(servers, note)
     try:
         with open(path, encoding='utf-8') as stream:
             if stream.read() == text:
@@ -552,16 +633,16 @@ class Bridge:
             LOG.warning('Invalid Android network snapshot')
             graph, settings = make_graph(None)
             snapshot = None
-        # Only a snapshot says what Android's network is: an unreachable Android side changes nothing.
-        if snapshot is not None:
-            result = sync_resolv_conf(snapshot)
-            if result == 'written':
-                LOG.info('%s set from the Android default network', RESOLV_CONF)
-            elif result != self.resolv_result and result == 'kept':
-                LOG.info('%s was edited by hand (no "%s" line): not managing it', RESOLV_CONF, RESOLV_MARKER)
-            elif result != self.resolv_result and result == 'failed':
-                LOG.warning('Cannot write %s', RESOLV_CONF)
-            self.resolv_result = result
+        # A snapshot sets the servers; without one (Android cannot be asked) the servers there stay,
+        # and an empty resolver gets the last known ones (fallback_servers).
+        result = sync_resolv_conf(snapshot)
+        if result == 'written':
+            LOG.info('%s set %s', RESOLV_CONF, 'from the Android default network' if snapshot else 'from the last known DNS')
+        elif result != self.resolv_result and result == 'kept':
+            LOG.info('%s was edited by hand (no "%s" line): not managing it', RESOLV_CONF, RESOLV_MARKER)
+        elif result != self.resolv_result and result == 'failed':
+            LOG.warning('Cannot write %s', RESOLV_CONF)
+        self.resolv_result = result
         old, old_settings = self.graph, self.settings
         self.graph, self.settings = graph, settings
         online = snapshot is not None

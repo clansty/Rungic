@@ -201,6 +201,18 @@ msgid "When on, anyone on the local network can try to sign in with the account 
 msgstr "开启后，局域网内的任何人都可以尝试用账户密码登录。请确认账户密码足够强，只在可信的网络中开启。"
 
 #: policy.json
+msgid "Own network (as the Rungic app)"
+msgstr "独立网络（以 Rungic 应用身份联网）"
+
+#: policy.json
+msgid "Linux connects to the network as the Rungic app: VPN apps such as SwiftWire or Clash apply the rules you set for Rungic to all of Linux, as to any app (docs/116). When off, Linux shares Android's network directly, and VPNs may treat its system traffic differently. A change takes effect when Rungic next starts."
+msgstr "Linux 以 Rungic 这个应用的身份联网：SwiftWire、Clash 等 VPN 应用对 Rungic 设的规则，会对整个 Linux 生效，和其他应用一样（docs/116）。关闭后，Linux 直接共用安卓的网络，VPN 可能会特殊对待它的系统流量。更改在 Rungic 下次启动时生效。"
+
+#: policy.json
+msgid "Turned off, Linux traffic does not follow the VPN rules you set for Rungic, and some VPNs break its system services' connections."
+msgstr "关闭后，Linux 的流量不再遵循你给 Rungic 设的 VPN 规则，有些 VPN 会让它的系统服务连不上网。"
+
+#: policy.json
 msgid "Docker (rootless)"
 msgstr "Docker（rootless）"
 

@@ -13,6 +13,17 @@
    "start": ["ssh.socket"]
   },
   {
+   "id": "own-network",
+   "name": "Own network (as the Rungic app)",
+   "default": "enabled",
+   "risk": "none",
+   "evidence": "recorded",
+   "summary": "Linux connects to the network as the Rungic app: VPN apps such as SwiftWire or Clash apply the rules you set for Rungic to all of Linux, as to any app (docs/116). When off, Linux shares Android's network directly, and VPNs may treat its system traffic differently. A change takes effect when Rungic next starts.",
+   "warning": "Turned off, Linux traffic does not follow the VPN rules you set for Rungic, and some VPNs break its system services' connections.",
+   "system": ["rungic-own-network.service"],
+   "start": ["rungic-own-network.service"]
+  },
+  {
    "id": "docker",
    "name": "Docker (rootless)",
    "default": "disabled",
