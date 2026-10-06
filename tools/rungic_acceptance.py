@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: MIT
 """Post-release acceptance on the phone (docs/61): scenarios from release/acceptance.json.
 
-  rungic_acceptance.py smoke [--release V]     every deploy; about two minutes
+  rungic_acceptance.py smoke [--release V]     every deploy (about two minutes)
   rungic_acceptance.py full [--release V]      release candidates: smoke plus the full scenarios
   rungic_acceptance.py run ID... [--release V] selected scenarios
   rungic_acceptance.py compare A B             metrics of two reports (paths)
   rungic_acceptance.py render REPORT           readable report.md next to REPORT (no device access)
+  rungic_acceptance.py manual REPORT --manual ID=pass|fail:OBSERVATION
+                                              save human observations without rerunning automatic checks
 
-A check returns passed/metrics/details; metrics are compared with the newest report of an
+A check returns passed/metrics/details. The runner compares metrics with the newest report of an
 earlier release. Results: .work/acceptance/<release>/<time>/report.json. Every scenario
-restores what it changes (accessibility, display scale, recordings it made). Items that
-automatic checks do not replace are listed as manual in each report.
+restores what it changes (accessibility, display scale, recordings it made). Each report lists manual items
+that require human observations.
 """
 import argparse
 import datetime
@@ -1131,7 +1133,7 @@ def run_level(level, release=None, out_dir=None, since=None, skips=None, manual_
 
 
 def scenario_status(row):
-    """Read old reports conservatively without modifying the original evidence."""
+    """Read old reports conservatively without changing the original evidence."""
     if row.get('status'):
         return row['status']
     if row.get('passed') is True:
@@ -1208,8 +1210,9 @@ def combine(attempts, chain_warnings=()):
     flaky = [] if environment_errors else [id for id, row in observed.items() if scenario_status(row) == 'pass' and
              any(scenario_status(r) == 'fail' for _, report in attempts
                  for r in report.get('scenarios', []) if r['id'] == id)]
+    automatic_state = next((r.get('state') for _, r in reversed(attempts) if r.get('kind') != 'manual'), None)
     decision, reasons = verdict([scenario_status(r) for r in observed.values()], manual,
-        latest.get('state'), any(r.get('metadata_errors') for _, r in attempts),
+        automatic_state, any(r.get('metadata_errors') for _, r in attempts),
         initial_missing=first.get('missing', False), scope_known=first.get('scope', 'unknown') != 'unknown',
         chain_errors=chain_warnings, identity_errors=environment_errors)
     warnings = list(chain_warnings) + environment_errors
@@ -1218,7 +1221,9 @@ def combine(attempts, chain_warnings=()):
         if report.get('missing'):
             continue
         prefix = attempt_name(i) + '：'
-        if i and report.get('state', 'unknown') != 'finished':
+        if report.get('context_from'):
+            warnings.append(prefix + '人工补录的现场信息沿用关联报告。没有重新采集手机状态。')
+        if i and report.get('kind') != 'manual' and report.get('state', 'unknown') != 'finished':
             warnings.append(attempt_name(i) + '中断：重试没有跑完，未执行的项保留之前的结果。')
         device, system = report.get('device', {}), report.get('system', {})
         screen = device.get('screen')
@@ -1238,7 +1243,7 @@ def combine(attempts, chain_warnings=()):
     return {'first': first, 'latest': latest, 'observed': observed, 'manual': manual, 'counts': counts,
             'flaky': flaky, 'verdict': decision, 'reasons': reasons, 'warnings': warnings,
             'screen_warning': screen_warning, 'identity_errors': environment_errors,
-            'mergeable': not environment_errors and not first.get('missing')}
+            'mergeable': not environment_errors and not first.get('missing'), 'state': automatic_state}
 
 
 def conclusion_text(combined):
@@ -1301,10 +1306,13 @@ def status(row):
 
 
 def counts_text(report):
-    counts = result_counts(report.get('scenarios', []))
-    return '、'.join(f'{counts[key]} 项{term}' for key, term in zip(
+    counts = result_counts(report.get('scenarios', []), report.get('manual_results', []))
+    automatic = '、'.join(f'{counts[key]} 项{term}' for key, term in zip(
         ('pass', 'fail', 'skipped', 'unimplemented', 'not-run'),
-        ('通过', '失败', '跳过', '检查未实现', '未执行')) if counts[key]) or '没有执行结果'
+        ('通过', '失败', '跳过', '检查未实现', '未执行')) if counts[key])
+    human = '、'.join(f'{counts["manual-" + key]} 项人工{term}'
+                     for key, term in (('pass', '通过'), ('fail', '失败'), ('not-run', '未执行')) if counts['manual-' + key])
+    return '、'.join(part for part in (automatic, human) if part) or '没有执行结果'
 
 
 def yes_no(value, yes, no):
@@ -1350,7 +1358,7 @@ def render_report(path):
     actual, serial, screen = system.get('release'), device.get('serial'), device.get('screen')
     display_serial = serial if combined['mergeable'] else ' → '.join(md(r.get('device', {}).get('serial')) for _, r in attempts)
     def column_name(i):
-        name = attempt_name(i)
+        name = f'人工补录 {i}' if attempts[i][1].get('kind') == 'manual' else attempt_name(i)
         return name if combined['mergeable'] else name + '（' + md(attempts[i][1].get('device', {}).get('serial')) + '）'
     def attempt_status(row, report):
         value = status(row)
@@ -1374,7 +1382,7 @@ def render_report(path):
     run_coverage = {f['scenario'] for id in observed for f in features_for(id)} & live_scenarios
     uncovered = live_scenarios - defined_coverage
     observation_text = '。'.join(f'{attempt_name(i)}：报告缺失，计划未知' if r.get('missing') else
-        f'{attempt_name(i)}（计划 {len(r.get("scenarios", []))} 项）：{counts_text(r)}'
+        (f'人工补录 {i}：{counts_text(r)}' if r.get('kind') == 'manual' else f'{attempt_name(i)}（计划 {len(r.get("scenarios", []))} 项）：{counts_text(r)}')
         for i, (_, r) in enumerate(attempts))
     lines = [f'# 验收报告：{md(display_serial)} · {md(actual)} · {scope_name}', '', '> ' + conclusion, '']
     lines += ['> ⚠ ' + md(w) for w in warnings]
@@ -1388,10 +1396,10 @@ def render_report(path):
         next_step = '亮屏解锁后，在同一安装上重新运行冒烟检查，不需要重新部署。'
     elif failed:
         next_step = f'处理第 3 节的 {failed} 项失败。'
-    elif latest.get('state') != 'finished':
+    elif combined['state'] != 'finished':
         next_step = '重新运行检查。本报告保留了中断前的结果。'
     elif pending:
-        next_step = f'补填 {pending} 项人工结果：`--manual ID=pass|fail:说明`。'
+        next_step = f'补填 {pending} 项人工结果：`manual REPORT --manual ID=pass|fail:说明`。原始报告会保留。'
     elif missing:
         next_step = '补跑被跳过或未执行的检查，并补齐尚未实现的检查。'
     elif scope == 'smoke':
@@ -1524,8 +1532,12 @@ def render_report(path):
     for source, report in attempts:
         for row in report.get('scenarios', []):
             lines.append(f'| {md(source)} | {md(row["id"])} | {status(row)} | {md(row.get("seconds"))} | {md(row.get("details", {}).get("screenshot")) if row.get("details", {}).get("screenshot") else "无"} |')
+    lines += ['', '| 原始文件 | 人工检查 ID | 状态 | 实际观察 |', '| --- | --- | --- | --- |']
+    for source, report in attempts:
+        for row in report.get('manual_results', []):
+            lines.append(f'| {md(source)} | {md(row["id"])} | {status(row)} | {md(row.get("note"))} |')
     for i, (source, report) in enumerate(attempts):
-        lines += ['', f'{attempt_name(i)}报告自身（{md(source)}）：verdict={md(report.get("verdict"))}，state={md(report.get("state"))}。{counts_text(report)}。', '']
+        lines += ['', f'{column_name(i)}报告自身（{md(source)}）：verdict={md(report.get("verdict"))}，state={md(report.get("state"))}。{counts_text(report)}。', '']
     verdict_word = {'pass': '通过', 'fail': '未通过', 'incomplete': '未完成'}[decision]
     lines += [f'本页合并结论：{verdict_word}。功能说明来自当前仓库的 release/acceptance.json 与 quality/，不补写原始报告。', '']
     for source, report in attempts:
@@ -1534,6 +1546,53 @@ def render_report(path):
     output = path.with_name('report.md')
     output.write_text('\n'.join(lines), encoding='utf-8')
     return output
+
+
+def parse_manual(entries):
+    results = {}
+    for entry in entries:
+        key, sep, observation = entry.partition('=')
+        state, colon, note = observation.partition(':')
+        if not sep or not colon or state not in ('pass', 'fail') or not note.strip():
+            raise ValueError('--manual requires ID=pass|fail:OBSERVATION')
+        if key in results:
+            raise ValueError(f'duplicate manual ID: {key}')
+        results[key] = {'status': state, 'note': note.strip()}
+    return results
+
+
+def manual_report(path, results, out_dir=None):
+    """Save human observations in a new linked report. Do not rerun automatic checks or change previous evidence."""
+    import copy
+    import os
+    path = Path(path).resolve()
+    attempts, warnings = read_attempts(path)
+    combined = combine(attempts, warnings)
+    first, latest = combined['first'], combined['latest']
+    if first.get('scope') != 'full':
+        raise ValueError('manual observations require a readable full report')
+    if not results:
+        raise ValueError('no manual observations supplied')
+    definitions = {r['id']: r for r in combined['manual']}
+    rows = []
+    for id, value in results.items():
+        if id not in definitions:
+            raise ValueError(f'manual ID is not in the original full plan: {id}')
+        if value.get('status') not in ('pass', 'fail') or not value.get('note', '').strip():
+            raise ValueError(f'manual result requires pass or fail and an observation: {id}')
+        rows.append({'id': id, 'title': definitions[id]['title'], 'status': value['status'], 'note': value['note'].strip()})
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    out_dir = Path(out_dir) if out_dir else path.parent / ('manual-' + stamp)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output = out_dir / 'report.json'
+    report = {key: copy.deepcopy(latest[key]) for key in ('release', 'system', 'device', 'source', 'front', 'metadata_errors') if key in latest}
+    report.update(kind='manual', scope='manual', state='finished',
+                  time=datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
+                  scenarios=[], manual_results=rows, path=str(output),
+                  retry_of=os.path.relpath(path, out_dir), context_from=os.path.relpath(path, out_dir))
+    report_summary(report)
+    write_report(output, report, initial=True)
+    return report
 
 
 def main():
@@ -1549,10 +1608,21 @@ def main():
     p = sub.add_parser('run'); p.add_argument('ids', nargs='+'); p.add_argument('--release')
     p = sub.add_parser('compare'); p.add_argument('a'); p.add_argument('b')
     p = sub.add_parser('render'); p.add_argument('report')
+    p = sub.add_parser('manual'); p.add_argument('report'); p.add_argument('--out-dir')
+    p.add_argument('--manual', action='append', required=True, metavar='ID=pass|fail:OBSERVATION')
     a = parser.parse_args()
     if a.cmd == 'render':
         print(render_report(a.report))
         return 0
+    if a.cmd == 'manual':
+        try:
+            report = manual_report(a.report, parse_manual(a.manual), a.out_dir)
+        except ValueError as error:
+            parser.error(str(error))
+        attempts, warnings = read_attempts(Path(report['path']).resolve())
+        decision = combine(attempts, warnings)['verdict']
+        print(json.dumps({'verdict': decision, 'attempt_verdict': report['verdict'], 'path': report['path']}, ensure_ascii=False))
+        return {'pass': 0, 'fail': 1, 'incomplete': 2}[decision]
     if a.cmd == 'compare':
         print(json.dumps(compare(json.loads(Path(a.b).read_text()), json.loads(Path(a.a).read_text())), indent=1))
         return 0
@@ -1572,15 +1642,10 @@ def main():
             if not sep or not reason.strip():
                 parser.error('--skip requires ID=REASON')
             skips[key] = reason
-        manual = {}
-        for entry in getattr(a, 'manual', []):
-            key, sep, observation = entry.partition('=')
-            status, colon, note = observation.partition(':')
-            if not sep or not colon or status not in ('pass', 'fail') or not note.strip():
-                parser.error('--manual requires ID=pass|fail:OBSERVATION')
-            if key in manual:
-                parser.error(f'duplicate manual ID: {key}')
-            manual[key] = {'status': status, 'note': note.strip()}
+        try:
+            manual = parse_manual(getattr(a, 'manual', []))
+        except ValueError as error:
+            parser.error(str(error))
         try:
             report = run_level(a.cmd, a.release, skips=skips, manual_results=manual)
         except ValueError as error:

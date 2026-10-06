@@ -450,3 +450,84 @@ def test_render_shows_each_phone_instead_of_claiming_the_second_inherits_the_fir
     assert '手机序列号不同（TEST-PHONE → OTHER-PHONE）' in rendered
     assert '首次（TEST-PHONE）' in rendered and '重试（OTHER-PHONE）' in rendered
     assert '不能合成一台手机的结论' in rendered
+
+
+# covers: delivery.acceptance/E6
+def test_human_can_complete_a_full_report_without_rerunning_automatic_checks(runner, monkeypatch):
+    full = acc.run_scenarios([runner.scenario('one')], out_dir=runner.path, scope='full')
+    before = Path(full['path']).read_bytes()
+    monkeypatch.setattr(acc, 'run', lambda *args, **kwargs: pytest.fail('manual update touched phone'))
+    results = {f'manual.{i}': {'status': 'pass', 'note': f'real observation {i}'} for i in (1, 2)}
+    report = acc.manual_report(full['path'], results, out_dir=runner.path.parent / 'human')
+    assert not report['scenarios'] and report['kind'] == 'manual'
+    assert (Path(report['path']).parent / report['retry_of']).resolve() == Path(full['path']).resolve()
+    attempts, warnings = acc.read_attempts(Path(report['path']))
+    assert acc.combine(attempts, warnings)['verdict'] == 'pass'
+    assert Path(full['path']).read_bytes() == before
+    rendered = acc.render_report(report['path']).read_text()
+    assert '本次完整检查计划通过' in rendered
+    assert '没有重新采集手机状态' in rendered
+    assert 'real observation 1' in rendered
+
+
+# covers: delivery.acceptance/E6
+@pytest.mark.parametrize('scope,results', [('smoke', {'manual.1': {'status': 'pass', 'note': 'heard'}}),
+                                          ('full', {}), ('full', {'unknown': {'status': 'pass', 'note': 'heard'}})])
+def test_manual_update_rejects_unknown_plan_or_empty_input_without_creating_evidence(runner, scope, results):
+    full = acc.run_scenarios([runner.scenario('one')], out_dir=runner.path, scope=scope)
+    directory = runner.path.parent / 'human'
+    with pytest.raises(ValueError):
+        acc.manual_report(full['path'], results, out_dir=directory)
+    assert not directory.exists()
+
+
+# covers: delivery.acceptance/E6
+def test_manual_updates_keep_all_observations_and_do_not_overwrite_report_files(runner):
+    first = acc.run_scenarios([runner.scenario('one')], out_dir=runner.path, scope='full')
+    human1 = acc.manual_report(first['path'], {'manual.1': {'status': 'fail', 'note': 'inaudible speech'}}, runner.path.parent / 'human1')
+    human2 = acc.manual_report(human1['path'], {'manual.1': {'status': 'pass', 'note': 'heard clearly'}}, runner.path.parent / 'human2')
+    attempts, warnings = acc.read_attempts(Path(human2['path']))
+    combined = acc.combine(attempts, warnings)
+    assert combined['counts']['manual-pass'] == 1 and combined['counts']['manual-not-run'] == 1
+    assert combined['verdict'] == 'incomplete'
+    before = Path(human2['path']).read_bytes()
+    with pytest.raises(FileExistsError):
+        acc.manual_report(human1['path'], {'manual.2': {'status': 'pass', 'note': 'viewed image'}}, runner.path.parent / 'human2')
+    assert Path(human2['path']).read_bytes() == before
+    rendered = acc.render_report(human2['path']).read_text()
+    assert 'inaudible speech' in rendered and 'heard clearly' in rendered
+
+
+# covers: delivery.acceptance/E6
+def test_manual_cli_reports_the_combined_decision_and_preserves_source_json(runner):
+    import subprocess
+    import sys
+    full = acc.run_scenarios([runner.scenario('one')], out_dir=runner.path, scope='full')
+    before = Path(full['path']).read_bytes()
+    command = [sys.executable, str(Path(acc.__file__)), 'manual', full['path'], '--out-dir', str(runner.path.parent / 'human'),
+               '--manual', 'manual.1=pass:heard real speech', '--manual', 'manual.2=pass:viewed real image']
+    executed = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert executed.returncode == 0, executed.stderr
+    output = json.loads(executed.stdout)
+    assert output['verdict'] == 'pass' and output['attempt_verdict'] == 'incomplete'
+    assert Path(full['path']).read_bytes() == before
+
+
+# covers: delivery.acceptance/E6
+def test_manual_update_does_not_mark_an_interrupted_automatic_run_finished(runner, monkeypatch):
+    calls = []
+    def interrupted(*args):
+        calls.append(True)
+        if len(calls) == 1:
+            return None, None
+        raise KeyboardInterrupt('interrupted after automatic observation')
+    monkeypatch.setattr(acc, 'previous_report', interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        acc.run_scenarios([runner.scenario('one')], out_dir=runner.path, scope='full')
+    results = {f'manual.{i}': {'status': 'pass', 'note': 'observed'} for i in (1, 2)}
+    report = acc.manual_report(runner.path / 'report.json', results, out_dir=runner.path.parent / 'human')
+    assert report['state'] == 'finished'
+    attempts, warnings = acc.read_attempts(Path(report['path']))
+    combined = acc.combine(attempts, warnings)
+    assert combined['verdict'] == 'incomplete' and combined['state'] == 'interrupted'
+    assert combined['counts']['pass'] == 1 and combined['counts']['manual-pass'] == 2
