@@ -2404,7 +2404,7 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 - **E6** Linux 程序的域名解析跟随安卓当前默认网络（开 VPN 时用 VPN 的 DNS）：/etc/resolv.conf 随网络变化原子更新。解析器任何时候都不留空：安卓侧连不上、刚开机还没有快照或一时没有默认网络时，沿用最近一次安卓给的 DNS（存在磁盘上，重启后也在）；从来没有过时用 Linux 能看到的默认网关（Wi-Fi 优先），安卓给出真实值后替换。（单元测试）
 - **E7** 用户手工写的 /etc/resolv.conf（没有 Rungic 标记行）或符号链接不被覆盖。（单元测试）
 - **E8** 手机显示 APK 不在时，网络状态与事件仍由独立硬件后端提供；故障明确报错，不重复提交操作。（单元测试）
-- **E9** “独立网络”服务（默认打开）：Linux 有自己的网络命名空间，由 pasta 以 Rungic 应用的安卓 uid 替它联网，安卓和 VPN 应用把 Linux 当成 Rungic 应用（走 VPN、用 VPN 的 DNS、守分应用规则）。局域网 SSH、访问安卓服务的抽象 socket 与本机端口照常可用；强行停止 App 不影响网络。关掉后下次启动 Linux 时回到共享安卓的网络。（单元测试）
+- **E9** “独立网络”服务（默认打开）：Linux 有自己的网络命名空间，由 pasta 以 Rungic 应用的安卓 uid 替它联网，安卓和 VPN 应用把 Linux 当成 Rungic 应用（走 VPN、用 VPN 的 DNS、守分应用规则）。局域网 SSH、访问安卓服务的抽象 socket 与本机端口照常可用；强行停止 App 不影响网络。关掉后下次启动 Linux 时回到共享安卓的网络。（单元测试、人工）
 
 注意：
 - 镜像只带一行占位注释的 /etc/resolv.conf，原先没有任何机制写入 DNS，新装设备的 Linux 程序解析不了域名（issue [docs/research/32-network-integration.md](../docs/research/32-network-integration.md)

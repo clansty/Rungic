@@ -758,6 +758,8 @@ features:
         text: 手机显示 APK 不在时，网络状态与事件仍由独立硬件后端提供；故障明确报错，不重复提交操作。
       - id: E9
         text: “独立网络”服务（默认打开）：Linux 有自己的网络命名空间，由 pasta 以 Rungic 应用的安卓 uid 替它联网，安卓和 VPN 应用把 Linux 当成 Rungic 应用（走 VPN、用 VPN 的 DNS、守分应用规则）。局域网 SSH、访问安卓服务的抽象 socket 与本机端口照常可用；强行停止 App 不影响网络。关掉后下次启动 Linux 时回到共享安卓的网络。
+        evidence:
+          - {doc: docs/116-own-network.md, date: 2026-10-06, note: "G100 S + SwiftWire：三类流量、中转、声音、SSH、强行停止 App、开关来回"}
     pitfalls:
       - text: 镜像只带一行占位注释的 /etc/resolv.conf，原先没有任何机制写入 DNS，新装设备的 Linux 程序解析不了域名（issue #7）。容器与安卓共用网络命名空间（lxc.net.0.type = none），可以直接用安卓默认网络的 DNS。严格模式的私人 DNS（DoT）不在此列：容器仍按普通 53 端口查询。
         docs: [docs/research/32-network-integration.md]
