@@ -129,6 +129,9 @@ class Panel:
         env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), DBUS_SESSION_BUS_ADDRESS=address,
                    RUNGIC_PLATFORM_SOCKET=platform.path, GDK_BACKEND='broadway', BROADWAY_DISPLAY=f':{display}',
                    LANG='C.UTF-8', LANGUAGE='', GSK_RENDERER='cairo', GIO_USE_VFS='local')
+        # The installed package puts this module on Python's search path.
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(ROOT / 'shared' / 'platform'),
+                                                       env.get('PYTHONPATH')]))
         env.pop('WAYLAND_DISPLAY', None)
         env.pop('DISPLAY', None)
         self.broadway = subprocess.Popen(['gtk4-broadwayd', '--address', '127.0.0.1', f':{display}'], env=env,
