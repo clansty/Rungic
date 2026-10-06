@@ -65,9 +65,9 @@ class NoDeviceTests(unittest.TestCase):
         self.assertEqual(self.started, [])
 
     # covers: delivery.offline-tests/E2
-    def test_direct_and_shell_remote_commands_fail_before_start(self):
-        for argv in (['ssh', '-V'], ['/usr/bin/ssh', '-V'], ['adb', 'version'],
-                     ['scp', '-V'], ['sftp', '-V'], ['sh', '-c', 'ssh -V']):
+    def test_absolute_remote_commands_fail_before_start(self):
+        for argv in (['/usr/bin/ssh', '-V'], ['/usr/bin/adb', 'version'],
+                     ['/usr/bin/scp', '-V'], ['/usr/bin/sftp', '-V']):
             with self.subTest(argv=argv), self.assertRaisesRegex(pytest.fail.Exception, 'external command'):
                 subprocess.Popen(argv)
 
@@ -84,14 +84,27 @@ class NoDeviceTests(unittest.TestCase):
 
 
 # covers: delivery.offline-tests/E2
-def test_child_shell_cannot_hide_a_remote_call_in_a_variable(no_device, tmp_path):
+@pytest.mark.parametrize('body', ['tool=ssh; "$tool" -V || true',
+                                  'echo ready | ssh -V || true',
+                                  'env X=1 ssh -V || true'])
+def test_child_shell_records_remote_calls_even_if_errors_are_ignored(no_device, tmp_path, body):
     script = tmp_path / 'fallback.sh'
-    script.write_text('#!/bin/sh\ntool=ssh\n"$tool" -V 2>/dev/null || true\n')
+    script.write_text('#!/bin/sh\n' + body + '\n')
     result = subprocess.run(['sh', str(script)], capture_output=True, text=True)
     assert result.returncode == 0
     # Consume the expected violation after checking the sentinel's record.
     assert no_device.read_text().splitlines() == ['ssh']
     no_device.unlink()
+
+
+# covers: delivery.offline-tests/E2
+def test_shell_arguments_are_not_remote_commands(tmp_path):
+    source = tmp_path / 'input'
+    source.write_text('adb\n')
+    result = subprocess.run(['sh', '-c', 'echo ssh; grep adb "$1"', 'sh', str(source)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ['ssh', 'adb']
 
 
 @unittest.skipUnless(shutil.which('git'), 'needs git')

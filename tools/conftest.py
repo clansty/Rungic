@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """Reject device and build-host access in offline tests.
 
-Guard the tool entry points and direct remote commands before process creation.
+Guard tool entry points and absolute remote commands before process creation.
+PATH interception records remote commands from child scripts for teardown.
 Temporary shell scripts can replace remote programs for transport tests.
 Guard failures must escape transfer fallbacks that catch Exception.
 See docs/97 and docs/105 for incidents caused by incomplete test isolation.
@@ -25,7 +26,7 @@ def no_device(monkeypatch, tmp_path):
     import build_on_device
 
     def refuse(*args, **kwargs):
-        pytest.fail(f'an offline test reached the device: {list(args[:1])[:3]}', pytrace=False)
+        pytest.fail('an offline test reached the device', pytrace=False)
     monkeypatch.setattr(rungic_device, '_run', refuse)
     # Kept for tests that put a fake adb in RUNGIC_ADB and test how the phone is found
     # (tools/tests/test_rungic_agent_mcp.py); they restore it themselves.
@@ -66,19 +67,10 @@ def no_device(monkeypatch, tmp_path):
     class OfflinePopen(original_popen):
         def __init__(self, args, *positional, **kwargs):
             env = kwargs.get('env') or os.environ
-            argv = shlex.split(args) if isinstance(args, str) else list(args)
-            if argv:
-                check_command(os.fsdecode(argv[0]), env)
-            if kwargs.get('executable'):
-                check_command(os.fsdecode(kwargs['executable']), env)
-            if kwargs.get('shell'):
-                commands = shlex.split(args, comments=True) if isinstance(args, str) else argv
-            elif argv and Path(os.fsdecode(argv[0])).name in {'sh', 'bash', 'dash'} and '-c' in argv:
-                commands = shlex.split(argv[argv.index('-c') + 1], comments=True)
-            else:
-                commands = []
-            for command in commands:
-                check_command(os.fsdecode(command), env)
+            command = args if isinstance(args, (str, bytes)) else args[0]
+            for value in (command, kwargs.get('executable')):
+                if value and Path(os.fsdecode(value)).is_absolute():
+                    check_command(os.fsdecode(value), env)
             super().__init__(args, *positional, **kwargs)
     monkeypatch.setattr(subprocess, 'Popen', OfflinePopen)
     yield violations
