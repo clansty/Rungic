@@ -902,6 +902,8 @@ features:
         text: 独立后端退出后有限恢复，退出记录有界落盘。不能重启健康的容器或重放短信。
       - id: E6
         text: 麦克风、相机、手机外放和 Agent 通话的声音由独立媒体后端提供（root 进程，不在 App 里）。App 被隐藏、冻结或强行停止时，进行中的 Agent 通话照常进行；App 回来后重新连上。桌面的麦克风和相机仍只在用户给了 Rungic 权限、桌面在前台时使用；App 不在时按不在前台处理。
+        evidence:
+          - {doc: docs/117-media-backend.md, date: 2026-10-06, note: "G100 S：通话中强行停止 App，后台接管音频模式，通话与唤醒锁保留；相机、录音场景通过"}
     pitfalls:
       - text: root 进程用 CameraManager.openCamera 时，框架会读一项开发者设置；ActivityManager 不认识的进程读不了（SecurityException），要先预置框架里缓存它的静态字段。
         docs: [docs/117-media-backend.md]
