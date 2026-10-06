@@ -335,6 +335,8 @@ features:
         gap: 还没有对 GitHub 实际执行过：对外发布要用户确认
       - id: E8
         text: 每次部署（成功、失败、中止，以及 deploy --all 里连不上的手机）在 release/history.json 追加一行：版本、提交、渠道、手机序列号、结果、时间，随仓库提交。
+      - id: E9
+        text: drift [--all] 逐项说出一台手机和 origin/main 差在哪：每个自有包和上游组件按它来自的提交（开发覆盖的，否则发布的）比它的构建来源，APK 的 versionCode，每个安卓侧文件（发布清单和 host seed 的）；编译出来的宿主程序比不了，就说它的源码在手机的发布之后改过没有。全部一致才算同步。
     pitfalls:
       - text: 2026-10-04 之前各开发机有自己的 APT 仓库，发布号在不同机器上各自增长。最后一个正式发布是 20260930.10，之后合并的改动只以开发覆盖散落在手机上。dev 渠道之后只从 origin/main 出发布。
         docs: [docs/109-dev-release-channel.md]

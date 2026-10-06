@@ -512,3 +512,54 @@ class SelectedPhoneTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Drift(unittest.TestCase):
+    """drift: what of a phone differs from origin/main, part by part."""
+
+    def parts(self, info, apk, android, differ, main=None):
+        main = main or {
+            'release/packages.json': json.dumps({'project': {'rungic-a': {}, 'rungic-b': {}},
+                                                 'rebuilt': {'kwin': {'source': 'packages/kwin'}},
+                                                 'android': [{'source': 'system/x', 'path': '/data/adb/x'}]}).encode(),
+            'android/app/AndroidManifest.xml': b'<manifest android:versionCode="91" android:versionName="2.43">',
+            'system/x': b'new', 'tools/ci/build_host_seed.py': b'', 'tools/cast_payload.py': b''}
+        definitions = {n: {'name': n, 'paths': [f'src/{n}'], 'dir': rungic_release.WORKSPACE / f'packaging/{n}'}
+                       for n in ('rungic-a', 'rungic-b')}
+        import pq
+        import rungic_package
+        with patch.object(rungic_release, 'main_file', main.get), \
+             patch.object(rungic_release, 'differing', lambda commit, paths: differ(commit, paths)), \
+             patch.object(rungic_package, 'definitions', lambda: definitions), \
+             patch.object(pq, 'overlay', lambda name: {}):
+            return rungic_release.drift_parts(info, apk, android)
+
+    # covers: delivery.dev-channel/E9
+    def test_a_phone_like_main_is_in_sync(self):
+        sha = hashlib.sha256(b'new').hexdigest()
+        self.assertEqual(self.parts({'commit': 'base'}, 91, {'/data/adb/x': sha}, lambda c, p: []), [])
+
+    # covers: delivery.dev-channel/E9
+    def test_each_part_is_compared_at_the_commit_it_came_from(self):
+        seen = {}
+
+        def differ(commit, paths):
+            seen[tuple(paths)] = commit
+            return ['src/rungic-b/f.py'] if 'src/rungic-b' in paths else []
+        info = {'commit': 'base', 'dev': {'overrides': {'rungic-b': {'commit': 'overlay1', 'dirty': False}}}}
+        found = self.parts(info, 90, {}, differ)
+        self.assertEqual(seen[('packaging/rungic-a', 'src/rungic-a')], 'base')        # the release's
+        self.assertEqual(seen[('packaging/rungic-b', 'src/rungic-b')], 'overlay1')    # the overlay's
+        self.assertEqual(seen[('packages/kwin',)], 'base')
+        self.assertEqual({p['part']: p['state'] for p in found}, {
+            'rungic-b': '1 files differ', 'apk': 'versionCode 90 on the phone, 91 on main',
+            '/data/adb/x': 'missing on the phone'})
+        self.assertEqual(found[0]['from'], 'overlay')
+
+    # covers: delivery.dev-channel/E9
+    def test_an_overlay_from_a_commit_this_repository_lacks_is_said_so(self):
+        info = {'commit': 'base', 'dev': {'overrides': {'rungic-a': {'commit': 'elsewhere'}}}}
+        found = self.parts(info, 91, {'/data/adb/x': hashlib.sha256(b'new').hexdigest()},
+                           lambda c, p: None if c == 'elsewhere' else [])
+        self.assertEqual(found, [{'part': 'rungic-a', 'from': 'overlay', 'commit': 'elsewhere',
+                                  'state': 'commit not in this repository'}])

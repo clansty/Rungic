@@ -57,6 +57,11 @@ Deployment installs it only when the phone has a lower versionCode.
    Each row shows release, channel, commits behind main, APK, overlay count, and APT protection.
    For one phone, use `python3 tools/rungic_dev.py status` for the baseline and overlays.
    Use `python3 tools/rungic_release.py status` for snapshots and integrity.
+5. To learn how far a phone is from main, read `python3 tools/rungic_release.py drift --all`.
+   The "commits behind main" count of `status --all` covers only the base release.
+   `drift` compares every part with origin/main: each package at its overlay's or release's commit, the APK, and each Android-side file.
+   It prints "in sync" or the parts that differ.
+   It cannot compare built host programs, such as `rungic-plasma-enter`, and a release does not update them.
 
 ## Development overlays
 
@@ -116,6 +121,7 @@ Use a clean worktree whose HEAD equals `origin/main`, for example one created wi
 python3 tools/rungic_release.py dev
 python3 tools/rungic_release.py deploy <version> --all
 python3 tools/rungic_release.py status --all
+python3 tools/rungic_release.py drift --all
 ```
 
 `dev` builds missing packages, components, and the APK, then creates a `YYYYMMDD.N` release bundle.

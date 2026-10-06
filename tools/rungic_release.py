@@ -35,6 +35,11 @@ pool and a numbering per machine, the APK part of the release.
   rungic_release.py deploy --from FILE  deploy a bundle another machine made (with or without --all)
   rungic_release.py status --all        one row per connected phone: release, channel, commit, behind
                                       origin/main, APK, development overlays, how apt holds the release
+  rungic_release.py drift [--all]       how far a phone is from origin/main, part by part: each project
+                                      package and upstream component (its release's or its development
+                                      overlay's commit against main's, over the paths it is built from),
+                                      the APK's versionCode and every Android-side file; "in sync" or
+                                      what differs
   rungic_release.py publish V [--yes]   the GitHub pre-release dev-V (gh); without --yes only the command
                                       and the notes: publishing is confirmed by the owner first
 
@@ -1592,6 +1597,158 @@ def phone_status():
             'apt': apt}
 
 
+def main_file(path):
+    """A file as origin/main has it (bytes), None where main has none."""
+    result = subprocess.run(['git', 'show', f'origin/main:{path}'], cwd=WORKSPACE, capture_output=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def differing(commit, paths):
+    """The files under `paths` that differ between `commit` and origin/main; None when this repository
+    does not have that commit (an overlay built from a branch never fetched here)."""
+    if subprocess.run(['git', 'cat-file', '-e', f'{commit}^{{commit}}'], cwd=WORKSPACE, capture_output=True).returncode:
+        return None
+    return [f for f in git('diff', '--name-only', commit, 'origin/main', '--', *paths).splitlines() if f]
+
+
+# Android-side programs built from source (tools/build_enter.sh) that the host seed installs but a
+# release does not: only whether their source changed since the phone's release can be said.
+BUILT_HOST_PROGRAMS = {'/data/adb/rungic-plasma/rungic-plasma-enter': 'tools/rungic_plasma_enter.c',
+                       '/data/adb/rungic-lxc/rungic-lxc-enter': 'tools/rungic_lxc_enter.c'}
+
+
+def android_files():
+    """origin/main's Android-side files: {path on the phone: source}, the release's (packages.json
+    "android") and the host seed's (tools/ci/build_host_seed.py), which a release does not update."""
+    files = {e['path']: e['source'] for e in json.loads(main_file('release/packages.json') or b'{}').get('android', [])}
+    seed = (main_file('tools/ci/build_host_seed.py') or b'').decode()
+    for source, dest in re.findall(r'\(\s*"([^"]+)",\s*"([^"]+)",\s*0o\d+\s*\)', seed):
+        if not source.startswith(('lxc_', 'plasma_')):
+            files.setdefault('/data/adb/' + dest, source)
+    cast = (main_file('tools/cast_payload.py') or b'').decode()
+    for source, dest in re.findall(r'\(\s*\'([^\']+)\',\s*\'([^\']+)\',\s*0o\d+\s*\)', cast):
+        files.setdefault('/data/adb/rungic-wfd/' + dest, source)
+    # Built artifacts (the cast JAR, the entry programs) are named, not paths: not compared here.
+    return {path: source for path, source in files.items() if '/' in source}
+
+
+def drift_parts(info, apk_code, android):
+    """The parts of a phone that differ from origin/main. `info` is its release.json, `apk_code` its
+    APK's versionCode, `android` {path: sha256 or None} of the Android-side files on it.
+    Each project package and upstream component is compared at the commit it came from: its
+    development overlay's (docs/97) or else the release's, over what it is built from
+    (rungic_package.identity_paths, component paths). Content, not ancestry: squash merges leave a
+    merged branch's commits outside main."""
+    import pq
+    import rungic_package
+
+    def overlaid(name):
+        """The shared files a component's recipe places in its source (none without a recipe)."""
+        try:
+            return {e['from'] for e in pq.overlay(name).values()}
+        except SystemExit:
+            return set()
+    base = info.get('commit')
+    overrides = info.get('dev', {}).get('overrides', {})
+    main_spec = json.loads(main_file('release/packages.json') or b'{}')
+    definitions = rungic_package.definitions()
+    parts = []
+    for name in sorted(main_spec.get('project', {})):
+        pkg = definitions.get(name)
+        paths = sorted({*pkg['paths'], str(pkg['dir'].relative_to(WORKSPACE)),
+                        *(p for u in pkg.get('upstream', []) for p in {f'packages/{u}', *overlaid(u)})}) \
+            if pkg else [f'packaging/{name}']
+        parts.append((name, paths))
+    for name, component in sorted(main_spec.get('rebuilt', {}).items()):
+        if component.get('source', '').startswith('packages/'):
+            parts.append((name, sorted({f'packages/{name}', *overlaid(name)})))
+    found = []
+    for name, paths in parts:
+        override = overrides.get(name)
+        commit = (override or {}).get('commit') or base
+        source = 'overlay' if override else 'release'
+        if not commit:
+            found.append({'part': name, 'from': source, 'state': 'unknown commit'})
+            continue
+        files = differing(commit, paths)
+        if files is None:
+            found.append({'part': name, 'from': source, 'commit': commit[:12], 'state': 'commit not in this repository'})
+        elif files or (override or {}).get('dirty'):
+            found.append({'part': name, 'from': source, 'commit': commit[:12],
+                          'state': f'{len(files)} files differ' + (', built from uncommitted changes' if override.get('dirty') else '')
+                          if override else f'{len(files)} files differ', 'files': files[:6]})
+    manifest = (main_file('android/app/AndroidManifest.xml') or b'').decode()
+    main_code = re.search(r'versionCode="(\d+)"', manifest)
+    main_code = int(main_code.group(1)) if main_code else None
+    if apk_code != main_code:
+        found.append({'part': 'apk', 'state': f'versionCode {apk_code} on the phone, {main_code} on main'})
+    release_paths = {e['path'] for e in main_spec.get('android', [])}
+    for path, source in android_files().items():
+        content = main_file(source)
+        want = hashlib.sha256(content).hexdigest() if content is not None else None
+        have = android.get(path)
+        if have != want and not (have is None and path not in release_paths):
+            state = 'missing on the phone' if have is None else 'not on main' if want is None else 'differs from main'
+            found.append({'part': path, 'state': state + ('' if path in release_paths else ' (host seed only: a release does not update it)')})
+    for path, source in BUILT_HOST_PROGRAMS.items():
+        if base and differing(base, [source]):
+            found.append({'part': path, 'state': f'cannot compare a built program; {source} changed since the '
+                          "phone's release, and a release does not update it"})
+    return found
+
+
+def phone_drift():
+    """drift of the selected phone (see drift_parts)."""
+    version, info = device_release()
+    if not info:
+        raise SystemExit('the phone has no Rungic release (release.json)')
+    _name, code = installed_apk()
+    main_spec = json.loads(main_file('release/packages.json') or b'{}')
+    paths = list(android_files())
+    text = run('for f in ' + ' '.join(shlex.quote(p) for p in paths) + '; do [ -f "$f" ] && sha256sum "$f"; done; true',
+               'root', timeout=60, check=False).stdout or ''
+    android = {line.split()[1]: line.split()[0] for line in text.splitlines() if len(line.split()) == 2}
+    parts = drift_parts(info, int(code) if code else None, android)
+    commit = info.get('commit')
+    behind = git('rev-list', '--count', f'{commit}..origin/main', check=False) if commit else ''
+    return {'release': version, 'commit': commit[:12] if commit else None,
+            'release_behind_main': int(behind) if behind.isdigit() else None,
+            'overlays': len(info.get('dev', {}).get('overrides', {})),
+            'in_sync': not parts, 'differs': parts}
+
+
+def drift(every=False):
+    """How far the selected phone, or every connected one, is from origin/main."""
+    git('fetch', '-q', 'origin', 'main', check=False)
+    found, others = phones() if every else ([None], [])
+    rows = []
+    for phone in found:
+        def one():
+            try:
+                return phone_drift()
+            except (Exception, SystemExit) as failure:
+                return {'error': f'{type(failure).__name__}: {failure}'[:200]}
+        if phone:
+            with rungic_device.selected(phone['serial'], phone['transport']):
+                row = {**phone, **one()}
+        else:
+            row = one()
+        rows.append(row)
+        label = row.get('serial') or 'phone'
+        if 'error' in row:
+            print(f"{label}: {row['error']}", flush=True)
+        elif row['in_sync']:
+            print(f"{label}: in sync with origin/main (release {row['release']})", flush=True)
+        else:
+            print(f"{label}: {len(row['differs'])} parts differ from origin/main (release {row['release']}, "
+                  f"{row['overlays']} overlays)", flush=True)
+            for part in row['differs']:
+                where = f" [{part['from']} {part.get('commit', '')}]".rstrip() + ']' if part.get('from') else ''
+                where = where.replace(']]', ']')
+                print(f"  {part['part']}{where}: {part['state']}", flush=True)
+    return {'result': 'ok' if all(r.get('in_sync') for r in rows) else 'drift', 'phones': rows, 'skipped': others}
+
+
 def status_all():
     """status of every connected Rungic phone, one row each (docs/109)."""
     git('fetch', '-q', 'origin', 'main', check=False)
@@ -1714,6 +1871,7 @@ def main():
         p.add_argument('--acceptance', choices=['smoke', 'full', 'none'], default='smoke')
     sub.add_parser('commit')
     p = sub.add_parser('status'); p.add_argument('--all', action='store_true', help='every connected Rungic phone')
+    p = sub.add_parser('drift'); p.add_argument('--all', action='store_true', help='every connected Rungic phone')
     p = sub.add_parser('dev')
     p.add_argument('--host', choices=['macmini', 'phone'], default=os.environ.get('RUNGIC_BUILD_HOST', 'macmini'),
                    help='where device packages build (default $RUNGIC_BUILD_HOST, else macmini)')
@@ -1757,6 +1915,8 @@ def main():
         result = {'bundle': str(export_bundle(a.version, a.out))}
     elif a.cmd == 'publish':
         result = publish(a.version, a.bundle, a.yes)
+    elif a.cmd == 'drift':
+        result = drift(a.all)
     else:
         result = status_all() if a.all else status()
     print(json.dumps(result, indent=1, ensure_ascii=False))
