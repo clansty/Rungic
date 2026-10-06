@@ -114,7 +114,7 @@ class Host:
 @pytest.fixture(scope='module')
 def bus():
     daemon = subprocess.Popen(['dbus-daemon', '--session', '--nofork', '--print-address=1'],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     try:
         assert select.select([daemon.stdout], [], [], 10)[0], 'The private D-Bus daemon did not report readiness.'
         address = daemon.stdout.readline().strip()
@@ -130,7 +130,6 @@ def bus():
             raise
         finally:
             daemon.stdout.close()
-            daemon.stderr.close()
 
 
 class Service:
