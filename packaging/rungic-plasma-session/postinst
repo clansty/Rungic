@@ -1,0 +1,7 @@
+#!/bin/sh
+# Start only the new timer on live upgrades; leave administrator disables intact.
+if [ "${1:-}" = configure ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    if systemctl is-enabled --quiet rungic-runtime-health.timer; then
+        deb-systemd-invoke start rungic-runtime-health.timer >/dev/null || true
+    fi
+fi
