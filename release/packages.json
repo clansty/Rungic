@@ -317,6 +317,21 @@
       "source": "system/rootfs-mount-hook",
       "path": "/data/adb/rungic-plasma/rootfs-mount-hook",
       "mode": "755"
+    },
+    {
+      "source": "system/rungic-runtime",
+      "path": "/data/adb/rungic-plasma/rungic-runtime",
+      "mode": "755"
+    },
+    {
+      "source": "system/runtime-boot.sh",
+      "path": "/data/adb/service.d/rungic-runtime.sh",
+      "mode": "700"
+    },
+    {
+      "source": "system/runtime-boot.sh",
+      "path": "/data/adb/rungic-plasma/runtime-boot.sh",
+      "mode": "755"
     }
   ],
   "user_restart": {

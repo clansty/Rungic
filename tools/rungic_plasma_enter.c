@@ -7,6 +7,7 @@
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -40,17 +41,21 @@ int main(int argc, char **argv) {
         if (mount(source, target, NULL, MS_BIND | MS_REC, NULL) < 0)
             fail(target);
     }
-    if (mount("/storage/emulated/0/Plasma", ROOT "/mnt/plasma-shared", NULL,
-              MS_BIND, NULL) < 0) fail("bind shared Linux files");
-    if (mkdir(ROOT "/mnt/plasma-wayland", 0755) < 0 && errno != EEXIST)
-        fail("mkdir Wayland bridge");
-    if (mount("/data/user/0/com.rungic.plasma/files/tmp", ROOT "/mnt/plasma-wayland", NULL,
-              MS_BIND, NULL) < 0) fail("bind Android Wayland socket directory");
-    if (mkdir(ROOT "/mnt/plasma-audio", 0755) < 0 && errno != EEXIST)
-        fail("mkdir audio bridge");
-    if (mount("/data/data/com.termux/files/usr/tmp/rungic-plasma-audio",
-              ROOT "/mnt/plasma-audio", NULL, MS_BIND, NULL) < 0)
-        fail("bind Android audio socket directory");
+    /* State queries must work before any display/audio client has created its
+     * bind sources. They only read LXC state and never attach or start payloads. */
+    if (strcmp(argv[1], "/usr/bin/lxc-info") != 0) {
+        if (mount("/storage/emulated/0/Plasma", ROOT "/mnt/plasma-shared", NULL,
+                  MS_BIND, NULL) < 0) fail("bind shared Linux files");
+        if (mkdir(ROOT "/mnt/plasma-wayland", 0755) < 0 && errno != EEXIST)
+            fail("mkdir Wayland bridge");
+        if (mount("/data/user/0/com.rungic.plasma/files/tmp", ROOT "/mnt/plasma-wayland", NULL,
+                  MS_BIND, NULL) < 0) fail("bind Android Wayland socket directory");
+        if (mkdir(ROOT "/mnt/plasma-audio", 0755) < 0 && errno != EEXIST)
+            fail("mkdir audio bridge");
+        if (mount("/data/data/com.termux/files/usr/tmp/rungic-plasma-audio",
+                  ROOT "/mnt/plasma-audio", NULL, MS_BIND, NULL) < 0)
+            fail("bind Android audio socket directory");
+    }
     /* A plain chroot leaves the mount namespace rooted at Android. LXC's
      * pidfd-based attach then resets / to Android despite joining the correct
      * namespace. Make the control environment the namespace's actual root.

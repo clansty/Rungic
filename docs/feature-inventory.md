@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 163 条功能、711 条体验，其中 668 条有检查。
+共 164 条功能、717 条体验，其中 674 条有检查。
 
 ## Agent 能力
 
@@ -2724,6 +2724,19 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 
 整机重启、应用被清数据或被强制停止之后，打开 Rungic 桌面照常回来。会话里有标准目录、登录环境和 SSH。
 
+#### 不打开显示应用也能启动和恢复 Linux（实验）
+
+`install.independent-runtime` · 依赖安卓 — 账户创建后，Magisk 开机入口独立启动 Linux 和 Agent；手机桌面在没有显示宿主时保留一个不渲染的输出。容器、Linux 服务和硬件适配各自监督，失败不会重启健康会话。
+
+- **E1** 账户和共享存储就绪后，不启动 Activity 也能拉起 Linux；账户未创建或手机未解锁时不会绕过准备条件。（单元测试）
+- **E2** 连续快速启动或退出故障最多尝试五次，保留失败状态供显式重试；不因单项服务失败重启整个桌面。（单元测试）
+- **E3** 用户显式停止后，开机不自动恢复；显式启动恢复监督。（单元测试）
+- **E4** 退出状态与启动故障持久保存并轮转，记录启动标识、服务、退出码和内存计数，不保存任务、短信、音频或凭据。（单元测试）
+- **E5** 首次启动没有宿主时桌面仍有有效输出；宿主首次出现后接入同一个 KWin 和窗口，不重启会话。（系统测试；只能在手机上看：手机 GPU 分配、显示恢复和输入需要整机验收，Linux 无头检查验证初始化与连接生命周期。）
+- **E6** 只提高 KWin 包装器及其直接合成器子进程、Plasma 和 Agent 主进程的内存回收优先级，不降低已有更强保护；其余应用仍受原有容器内存预算约束。（单元测试）
+
+文档：[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)
+
 #### SSH 自动开启
 
 `install.ssh-access` · Linux 系统功能 — 安装完成后，容器自动提供 SSH 连接，符合用户 2026-09-29 的要求。每台手机使用自己的主机密钥。用户可以用账户密码或密钥登录。
@@ -2771,7 +2784,7 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 - **E5** Android 重新挂载共享存储后，下次打开会重启容器重新绑定，共享文件夹恢复可用。（单元测试）
 
 注意：
-- APK 重新建出 files/tmp 之前，所有经过 rungic-plasma-enter 的控制命令都会报 bind Android Wayland socket directory。 [docs/96-desktop-recovery-after-apk-restart.md](../docs/96-desktop-recovery-after-apk-restart.md)
+- APK 重新建出 files/tmp 之前，启动和附着命令仍需要该目录；lxc-info 状态查询不挂载客户端目录。 [docs/96-desktop-recovery-after-apk-restart.md](../docs/96-desktop-recovery-after-apk-restart.md)
 - 只用 am force-stop 近似。Android 低内存真实杀掉 APK、卸载重装导致 uid 变化的场景还没验证。强制停止后立刻重开不复现，要隔 30 秒。 [docs/96-desktop-recovery-after-apk-restart.md](../docs/96-desktop-recovery-after-apk-restart.md)
 - pm clear 会撤销运行时权限、清掉 OCR 模型和 prefs。恢复文件后 restorecon 只给 s0，要按目录的完整 MLS 类别 chcon。toybox tar 不能打包 socket。 [docs/95-install-use-case-tests.md](../docs/95-install-use-case-tests.md)
 

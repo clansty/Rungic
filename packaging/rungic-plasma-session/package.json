@@ -25,9 +25,14 @@
     "desktop/rungic-plasma-display.service",
     "desktop/rungic-plasma-brightness.service",
     "desktop/kwin-override.conf",
-    "system/pulse-override.conf"
+    "system/pulse-override.conf",
+    "system/runtime-health",
+    "system/rungic-runtime-health.service",
+    "system/rungic-runtime-health.timer",
+    "system/service-exit",
+    "system/critical-service.conf"
   ],
-  "depends": "rungic-plasma-config, python3, python3-gi, bindfs, xdg-user-dirs, kwin-wayland (>= 4:6.6.6-0ubuntu0.1+rungic7~), plasma-mobile, pulseaudio",
+  "depends": "rungic-plasma-config, python3, python3-gi, bindfs, xdg-user-dirs, kwin-wayland (>= 4:6.6.6-0ubuntu0.1+rungic12~), plasma-mobile, pulseaudio",
   "build_depends": [
     "gettext",
     "qt6-base-dev",
@@ -38,7 +43,8 @@
   "units": {
     "system": [
       "rungic-plasma-session.service",
-      "rungic-plasma-shared.service"
+      "rungic-plasma-shared.service",
+      "rungic-runtime-health.timer"
     ],
     "user": [
       "rungic-plasma-display.service",

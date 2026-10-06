@@ -193,6 +193,29 @@ class Controller(unittest.TestCase):
         self.assertEqual(self.log(), ['stop'])
         self.assertFalse((self.root / 'storage/emulated/0/Plasma').exists())
 
+    # covers: install.independent-runtime/E1
+    def test_boot_start_without_display_is_idempotent_and_hardware_failure_is_local(self):
+        base = self.root / 'data/adb/rungic-plasma'
+        (base / 'runtime.enabled').touch()
+        executable(self.root / 'bin/chcon', ':')
+        executable(base / 'android-device', 'exit 19')
+        for _ in range(2):
+            code, out, err = self.run_action('boot-start')
+            self.assertEqual(code, 0, err)
+            self.assertIn('Linux service manager ready', out)
+            self.assertIn('Hardware backend failed: android-device', err)
+        self.assertEqual(sum(line.startswith('start ') for line in self.log()), 1)
+        self.assertFalse(any('session-restart' in line or line == 'stop' for line in self.log()))
+        self.assertFalse((self.files / 'tmp/wayland-0').exists())
+
+    # covers: install.independent-runtime/E3
+    def test_boot_start_does_not_race_explicit_stop(self):
+        base = self.root / 'data/adb/rungic-plasma'
+        (base / 'runtime.enabled').touch()
+        (base / 'runtime.disabled').touch()
+        self.assertEqual(self.run_action('boot-start')[0], 0)
+        self.assertEqual(self.log(), [])
+
 
 class LxcConfig(unittest.TestCase):
     def entries(self, key):
@@ -214,6 +237,52 @@ class LxcConfig(unittest.TestCase):
         binds = [e.split()[0] for e in self.entries('lxc.mount.entry') if e.startswith('/dev/')]
         self.assertEqual(sorted(binds), ['/dev/dma_heap/system', '/dev/kgsl-3d0', '/dev/video32', '/dev/video33'])
 
+
+
+class StateProbeWithoutClients(unittest.TestCase):
+    # covers: install.independent-runtime/E1
+    def test_native_state_query_works_when_client_bind_sources_are_absent(self):
+        import shutil
+        compiler = shutil.which('cc')
+        if not compiler:
+            self.skipTest('C compiler required for the native enter boundary')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mocks = root / 'boundary.c'
+            mocks.write_text(r'''#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
+uid_t __wrap_geteuid(void) { return 0; }
+int __wrap_unshare(int flags) { return 0; }
+int __wrap_mount(const char *source, const char *target, const char *type,
+                 unsigned long flags, const void *data) {
+    if (source && (strstr(source, "/storage/") || strstr(source, "/data/user/") || strstr(source, "com.termux"))) {
+        errno = ENOENT; return -1;
+    }
+    return 0;
+}
+int __wrap_mkdir(const char *path, mode_t mode) { return 0; }
+int __wrap_chdir(const char *path) { return 0; }
+long __wrap_syscall(long number, ...) { return 0; }
+int __wrap_umount2(const char *path, int flags) { return 0; }
+int __wrap_execv(const char *path, char *const argv[]) { puts(path); return 0; }
+''')
+            # The real helper treats a returning execv as failure; replace only
+            # the mock's successful exec boundary with process exit.
+            mocks.write_text(mocks.read_text().replace('#include <errno.h>', '#include <errno.h>\n#include <stdlib.h>')
+                             .replace('puts(path); return 0;', 'puts(path); exit(0);'))
+            binary = root / 'enter'
+            flags = [f'-Wl,--wrap={name}' for name in
+                     ['geteuid', 'unshare', 'mount', 'mkdir', 'chdir', 'syscall', 'umount2', 'execv']]
+            subprocess.run([compiler, str(ROOT / 'tools/rungic_plasma_enter.c'), str(mocks), *flags, '-o', str(binary)], check=True)
+            status = subprocess.run([str(binary), '/usr/bin/lxc-info', '-n', 'plasma', '-sH'], capture_output=True, text=True)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(status.stdout.strip(), '/usr/bin/lxc-info')
+            for command in ['/usr/bin/lxc-start', '/usr/bin/lxc-attach']:
+                result = subprocess.run([str(binary), command], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('bind shared Linux files', result.stderr)
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,10 @@
+[Unit]
+Description=Inspect Rungic critical services without restarting healthy sessions
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=30
+Unit=rungic-runtime-health.service
+
+[Install]
+WantedBy=timers.target

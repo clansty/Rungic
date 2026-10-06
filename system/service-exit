@@ -1,0 +1,13 @@
+#!/bin/sh
+# systemd supplies only these exit metadata fields. Never dump a process environment.
+set -eu
+case "${1:-}" in plasma-kwin_wayland|plasma-plasmashell|rungic-voice-agent) ;; *) exit 2;; esac
+state="${XDG_STATE_HOME:-$HOME/.local/state}/rungic"
+umask 077
+mkdir -p "$state"
+if [ -f "$state/$1-exits.log" ] && [ "$(wc -c < "$state/$1-exits.log")" -ge 65536 ]; then
+    mv -f "$state/$1-exits.log" "$state/$1-exits.previous.log"
+fi
+printf '%s boot=%s unit=%s result=%s code=%s status=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat /proc/sys/kernel/random/boot_id)" \
+    "$1" "${SERVICE_RESULT:-unknown}" "${EXIT_CODE:-unknown}" "${EXIT_STATUS:-unknown}" >> "$state/$1-exits.log"

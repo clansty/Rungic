@@ -54,9 +54,19 @@ else
     chcon "$rungic_label" "$rungic_files/.rungic-install-source.properties.tmp"
     mv "$rungic_files/.rungic-install-source.properties.tmp" "$source_file"
 fi
+# Copy only a launcher from the installed runtime, never an old product payload.
+install_runtime_boot() {
+    [ -x /data/adb/rungic-plasma/runtime-boot.sh ] || return 0
+    mkdir -p /data/adb/service.d
+    cp /data/adb/rungic-plasma/runtime-boot.sh /data/adb/service.d/rungic-runtime.sh.tmp
+    chmod 700 /data/adb/service.d/rungic-runtime.sh.tmp
+    mv /data/adb/service.d/rungic-runtime.sh.tmp /data/adb/service.d/rungic-runtime.sh
+}
+install_runtime_boot
 if [ -f "$marker" ] && [ "$(cat "$marker")" = "$RELEASE_ID" ]; then
     publish ready complete
     echo 'already installed'
+    [ ! -x /data/adb/rungic-plasma/rungic-runtime ] || /data/adb/rungic-plasma/rungic-runtime boot
     exit 0
 fi
 failure_code=unknown
@@ -233,6 +243,7 @@ chcon "$label" "$rungic_files" "$rungic_files/tmp"
 /data/adb/rungic-plasma/android-audio prepare || die 'audio directory preparation'
 /data/adb/rungic-plasma/rungic-plasma-enter /bin/true || die 'shared mount preflight'
 phase=finish; publish installing "$phase"
+install_runtime_boot
 # Casting shows the Linux desktop on the TV in an overlay window (docs/58), which needs this
 # app op; default-permissions cannot grant it. Some first boots refused appops from Magisk's
 # root context (docs/79), so the shell identity is the fallback, and the app asks again
@@ -252,3 +263,4 @@ failure_code=none
 publish ready complete
 finished=1
 echo "$(date -Iseconds) Rungic seed complete"
+[ ! -x /data/adb/rungic-plasma/rungic-runtime ] || /data/adb/rungic-plasma/rungic-runtime boot

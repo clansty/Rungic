@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import cast_payload
 ANDROID_FILES = (
+    ("system/rungic-runtime", "rungic-plasma/rungic-runtime", 0o755),
+    ("system/runtime-boot.sh", "rungic-plasma/runtime-boot.sh", 0o755),
+    ("system/runtime-boot.sh", "service.d/rungic-runtime.sh", 0o700),
     ("system/rungic-plasma", "rungic-plasma/rungic-plasma", 0o755),
     ("system/android-device", "rungic-plasma/android-device", 0o755),
     ("system/android-calls", "rungic-plasma/android-calls", 0o755),

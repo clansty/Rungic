@@ -43,13 +43,12 @@ class SourceLayoutTests(unittest.TestCase):
 
     # covers: delivery.release-deploy/E7
     def test_incremental_release_and_host_seed_agree(self):
-        destinations = {source: (dest, mode) for source, dest, mode in build_host_seed.ANDROID_FILES}
+        destinations = {(source, "/data/adb/" + dest): mode for source, dest, mode in build_host_seed.ANDROID_FILES}
         release = json.loads((ROOT / 'release/packages.json').read_text())
         for entry in release['android']:
             with self.subTest(source=entry['source']):
                 self.assertTrue((ROOT / entry['source']).is_file())
-                dest, mode = destinations[entry['source']]
-                self.assertEqual(entry['path'], '/data/adb/' + dest)
+                mode = destinations[(entry['source'], entry['path'])]
                 self.assertEqual(int(str(entry['mode']), 8), mode)
 
 

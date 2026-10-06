@@ -28,7 +28,8 @@ RUNGIC_LOGIN_VARS=
 if login_env=$(/usr/libexec/rungic-login-environment 2>/dev/null); then
     eval "$login_env"
 fi
-while [ ! -S /mnt/android-wayland/wayland-0 ]; do sleep 1; done
+# KWin's Android backend can configure an inhibited phone output before the
+# first host connection. Linux tasks and windows do not wait for an Activity.
 mkdir -p "$HOME/.config"
 # plasmashell turns one failed OpenGL start into a permanent software renderer for every Qt Quick
 # program (plasma-workspace shell/main.cpp: SceneGraphBackend=software in kdeglobals). Here such a

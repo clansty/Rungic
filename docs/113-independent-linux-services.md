@@ -2,6 +2,112 @@
 
 这轮改动以未来独立 Linux 发行版为边界：Agent、任务和工作区由 Linux 管理，Android 是当前的硬件后端，显示 APK 可以断开。不是另起一个同 APK UID 的子进程；那仍会随应用被强停或被冻结。
 
+## Independent startup and recovery (2026-10-06)
+
+The display app is a client. After the account has been configured and Android's
+shared storage becomes available following the first unlock, Linux starts without
+opening an Activity. Magisk's asynchronous `service.d` launcher calls
+`rungic-runtime boot`; both the initial installation and subsequent releases
+install that launcher. No installation, account setup, SMS or call is replayed.
+An explicit `rungic-plasma stop` persists a disabled marker across boots;
+`rungic-plasma start` restores supervision after the desktop becomes ready.
+
+`rungic-runtime` holds a private lock outside app freezer groups. It only starts a
+missing container through the serialized `boot-start` action. It never resets a
+failed user service or restarts a healthy desktop. An unavailable state query is
+retried without starting or stopping Linux. Native `lxc-info` skips client bind
+sources, so missing APK files cannot masquerade as a dead container. Five successive unsuccessful
+starts or short-lived container exits exhaust its budget; delays are 3, 12, 27,
+30 and 30 seconds, and each start has a 180-second deadline. A container must remain
+running for five minutes to reset the budget. Waiting for Android's first unlock
+does not consume that budget. Explicit start is required after exhaustion.
+
+Linux systemd continues to manage the desktop and Agent. The three critical user
+units receive a five-start limit within five minutes and five-second restart
+delays. Hardware adapters retain their own supervisors. `android-media` is an
+optional entry reserved for the separate media migration; its implementation is
+not included here. A hardware adapter's failed start is recorded without stopping
+Linux. The independent network work in PR #43 keeps its existing `start_container`
+hook; this branch does not implement another network forwarder.
+
+KWin's Android backend now supports its **first** start without a display host.
+It opens Linux's render device and creates one configured phone output with its
+render loop inhibited. Host windows and presentation layers are created on the
+first successful connection using the existing reconnect path. The session no
+longer waits for the host socket before launching Plasma. The ordinary nested
+Wayland backend still requires its upstream compositor. Package dependency
+`kwin-wayland >= 4:6.6.6-0ubuntu0.1+rungic12~` prevents combining this session script
+with an older backend. This is not a change to the stock display or input drivers.
+
+The existing configurable container memory budget remains authoritative: 4 GiB
+by default, RAM plus swap limited to 1.25 times the selected value. A root Linux
+health service checks the current systemd MainPID of KWin, Plasma and the Agent
+and applies `oom_score_adj=-250` to those UID 1000 main processes and KWin's
+direct compositor child (the main process is its upstream restart wrapper). The
+child must have the exact `/usr/bin/kwin_wayland` executable and the current wrapper
+as parent. It
+preserves any existing stronger protection. An open proc-file handle and a second
+MainPID check prevent PID reuse from redirecting the write. Other applications
+and worker processes receive no new OOM exemption. This improves memory reclaim
+priority; it does not prevent an explicit SIGKILL or guarantee survival under
+memory exhaustion, and no Moto-wide exemption is installed.
+
+Persistent evidence contains lifecycle metadata only:
+
+- `state/host/runtime/host.log` and its previous file: boot identifier, container
+  start/exit, retry state, exit code and memory cgroup counters.
+- `state/host/runtime/linux.log`: systemd MainPID, active state, restart count,
+  result and last main-process exit code. The health timer runs every 30 seconds.
+- Each critical unit's ExecStopPost callback writes a separate private log under
+  `$XDG_STATE_HOME/rungic` (default `~/.local/state/rungic`). Separate files avoid
+  concurrent callbacks racing rotation. Journald retains its existing limits.
+
+Logs rotate around 64 KiB and retain one previous file. They contain neither
+request bodies nor process environments. A SIGKILL status or OOM counter alone
+does not identify the killer; attribution still needs matching kernel/Android
+exit evidence. A killed supervisor cannot record its own final signal, but its
+last boot/state record remains available after a subsequent explicit start.
+
+### Upstream selection and validation
+
+Reuse [Magisk's late-start service scripts](https://topjohnwu.github.io/Magisk/guides.html)
+(the existing runtime is v31.0, GPL-3.0) and
+[systemd service restart/exit hooks](https://github.com/systemd/systemd/blob/v259/man/systemd.service.xml)
+(LGPL-2.1-or-later) instead of an app watchdog or a vendor-specific global killer
+bypass. The only host supervisor is the Android/LXC boundary; service policy stays
+in Linux. KWin remains pinned to Ubuntu 6.6.6 in `packages/kwin/recipe.json`, with
+GPL-2.0-or-later changes carried as a patch queue, including safe cleanup when a
+first connection never created an event thread. No new third-party daemon or
+unversioned binary is introduced.
+
+Offline sandbox tests execute the real boot supervisor and controller through
+fake platform boundaries: prerequisites, healthy-container preservation, local
+hardware failure, five-attempt exhaustion, rapid exits, explicit stop/start,
+freezer rejection, bounded logs, metadata-only exit callbacks and selective OOM
+protection. Patch-queue verification checks the reconstructed source.
+
+The native ARM64 build on Mac mini passed. The standalone Linux system test
+`tools/system/desktop_without_host.py` runs the actual newly built Android backend
+in software mode, without Android, against its own headless host and Qt editor.
+It starts the editor with unsaved text before any host exists, then checks the
+first attachment and two host losses/reconnections while retaining the same
+compositor/editor processes and text. Invoke it with
+`RUNGIC_KWIN_BINARY=/path/to/new/kwin_wayland`; a raw build may also need
+`QT_PLUGIN_PATH=/path/to/build/bin`. It is separate from the generic stock-KWin
+system image because that image does not carry the Android backend patch queue.
+
+**Device acceptance remains required:** cold boot followed by first unlock
+without opening the display APK; phone GPU allocation, first display attachment
+and touch/IME; backend fault isolation; APK force-stop during a task; explicit
+stop across a boot; unplugged background overnight; and compatibility with the
+separate network/media changes. No phone runtime, user desktop or power policy
+was modified to obtain the above results. The feature remains experimental until
+these checks run against one complete deployed candidate.
+
+## Earlier hardware-service split (2026-10-04/05)
+
+The following records describe the preceding change and its device evidence.
+
 ## 能力的归属
 
 | 能力 | 本轮前 | 本轮 | 原生发行版的替换方向 |

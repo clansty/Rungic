@@ -24,3 +24,4 @@ rungic/fullscreen-occlusion-throttle.patch
 rungic/screencast-dmabuf-other-rgb-format.patch
 rungic/phone-orientation-from-device-panel.patch
 rungic/android-host-reconnect.patch
+rungic/android-host-offline-start.patch

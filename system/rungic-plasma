@@ -13,7 +13,7 @@ action=${1:-status}
 # A product seed publishes the controller before the rootfs and shared paths.
 # Account setup must not enter that partially installed environment.
 case "$action" in
-  account-status|account-prepare|account-setup|start|restart-session)
+  account-status|account-prepare|account-setup|start|boot-start|restart-session)
     install_source=/data/adb/rungic-install/active.env
     [ -f "$install_source" ] || install_source=/product/etc/rungic/seed.env
     if [ -f "$install_source" ]; then
@@ -275,6 +275,43 @@ case "$action" in
   open)
     exec am start --user 0 -n com.rungic.plasma/.MainActivity
     ;;
+  boot-start)
+    # No UI launch, no restart/reset of an existing desktop or its failed units.
+    exec 9>"$BASE/control.lock"
+    flock 9 9>&9
+    [ -f "$BASE/runtime.enabled" ] || exit 0
+    [ ! -f "$BASE/runtime.disabled" ] || exit 0
+    state=$("$ENTER" /usr/bin/lxc-info -n plasma -sH) || exit 1
+    case "$state" in RUNNING|STOPPED) ;; *) echo 'Cannot establish container state' >&2; exit 1;; esac
+    if [ "$state" = STOPPED ]; then
+      # Installation/account readiness was checked by the independent supervisor.
+      # Create the bind source without starting an Android Activity.
+      files=/data/user/0/com.rungic.plasma/files
+      uid=$(stat -c %u "${files%/files}")
+      label=$(ls -dZ "${files%/files}" | cut -d ' ' -f 1)
+      case "$label" in u:object_r:app_data_file:s0:c*) ;; *) exit 1;; esac
+      mkdir -p "$files/tmp"
+      chown "$uid:$uid" "$files" "$files/tmp"
+      chcon "$label" "$files" "$files/tmp"
+      start_container
+    fi
+    # Hardware errors must not stop an otherwise usable Linux system. Each
+    # adapter owns its private lock, readiness protocol and restart budget.
+    for backend in android-audio android-device android-clipboard android-calls android-media; do
+      [ -x "$BASE/$backend" ] || continue
+      "$BASE/$backend" start 9>&- || echo "Hardware backend failed: $backend" >&2
+    done
+    ready=0
+    for attempt in $(seq 1 60); do
+      if attach /bin/sh -c 'state=$(systemctl is-system-running 2>/dev/null) || true;
+          case "$state" in running|degraded) exit 0;; *) exit 1;; esac' 9>&-; then
+        ready=1; break
+      fi
+      sleep 1
+    done
+    [ "$ready" = 1 ] || { echo 'Linux service manager did not become ready' >&2; exit 1; }
+    echo 'Linux service manager ready; display client may be absent'
+    ;;
   start|restart-session|stop)
     startup_phase=control-lock
     trap 'startup_result=$?; if [ "$startup_result" -ne 0 ]; then echo "Rungic control failed: action=$action phase=$startup_phase exit=$startup_result" >&2; fi' EXIT
@@ -282,6 +319,8 @@ case "$action" in
     # Surface recreation and explicit restarts can overlap; serialize them.
     flock 9 9>&9
     if [ "$action" = stop ]; then
+      [ ! -x "$BASE/rungic-runtime" ] || "$BASE/rungic-runtime" stop 9>&-
+      [ ! -x "$BASE/android-media" ] || "$BASE/android-media" stop 9>&-
       "$BASE/android-device" stop 9>&-
       "$BASE/android-calls" stop 9>&-
       "$BASE/android-clipboard" stop 9>&-
@@ -297,6 +336,7 @@ case "$action" in
     "$BASE/android-device" start 9>&-
     startup_phase=android-clipboard
     "$BASE/android-clipboard" start 9>&-
+    [ ! -x "$BASE/android-media" ] || "$BASE/android-media" start 9>&-
     startup_phase=android-calls
     "$BASE/android-calls" start 9>&-
     # The container binds /storage/emulated/0/Plasma when it starts. After an Android
@@ -364,8 +404,10 @@ case "$action" in
       sleep 1
     done
     [ "$ready" = 1 ] || { echo 'Desktop did not become ready; use plasma log' >&2; exit 1; }
+    [ ! -x "$BASE/rungic-runtime" ] || "$BASE/rungic-runtime" start 9>&-
     echo 'Plasma Mobile ready (native Wayland)'
     ;;
+  runtime-status) exec "$ENTER" /usr/bin/lxc-info -n plasma -sH ;;
   status) exec "$ENTER" /usr/bin/lxc-info -n plasma ;;
   memory-status) memory_status ;;
   boost)

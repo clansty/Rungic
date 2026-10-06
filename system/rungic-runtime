@@ -1,0 +1,140 @@
+#!/system/bin/sh
+# Android boundary only: Linux's service manager owns individual Linux services.
+set -eu
+umask 077
+BASE=/data/adb/rungic-plasma
+STATE=/data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/runtime
+BB=/data/adb/magisk/busybox
+[ "$(id -u)" = 0 ] || exit 1
+mkdir -p "$STATE"
+chmod 700 "$STATE"
+log() {
+    if [ -f "$STATE/host.log" ] && [ "$(wc -c < "$STATE/host.log")" -ge 65536 ]; then
+        tail -c 65536 "$STATE/host.log" > "$STATE/host.previous.log.tmp"
+        mv -f "$STATE/host.previous.log.tmp" "$STATE/host.previous.log"
+        rm -f "$STATE/host.log"
+    fi
+    printf '%s boot=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$boot" "$*" >> "$STATE/host.log"
+}
+boot=$(cat /proc/sys/kernel/random/boot_id)
+case "${1:-status}" in
+ start)
+    rm -f "$BASE/runtime.disabled"
+    touch "$BASE/runtime.enabled"
+    # Close caller's controller/install locks before taking our private supervisor lock.
+    "$BB" setsid /system/bin/sh -c '
+        exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+        exec /data/adb/magisk/busybox flock -n /data/adb/rungic-plasma/runtime.lock /data/adb/rungic-plasma/rungic-runtime watch
+    ' </dev/null >/dev/null 2>&1 &
+    ;;
+ boot)
+    # An explicit user stop remains stopped across boots; installing/upgrading does not undo it.
+    [ ! -f "$BASE/runtime.disabled" ] || exit 0
+    exec "$BASE/rungic-runtime" start
+    ;;
+ stop)
+    touch "$BASE/runtime.disabled"
+    rm -f "$BASE/runtime.enabled"
+    # Do not kill a saved PID: it may have been reused. The watcher notices this flag.
+    ;;
+ status)
+    [ ! -f "$STATE/status" ] || cat "$STATE/status"
+    ;;
+ watch)
+    # setsid does not remove an inherited APK freezer cgroup. Move only this supervisor.
+    for mount in /sys/fs/cgroup /dev/memcg /dev/cpuctl /dev/stune; do
+        [ ! -f "$mount/cgroup.procs" ] || echo $$ > "$mount/cgroup.procs"
+    done
+    if grep -Eq '/(apps/)?uid_[0-9]+' /proc/self/cgroup; then
+        log 'start-refused inherited-app-cgroup'
+        exit 1
+    fi
+    status() { printf '%s\n' "$*" > "$STATE/status.tmp"; mv "$STATE/status.tmp" "$STATE/status"; }
+    snapshot() {
+        # Counters and process lifecycle only; no commands, audio, requests or credentials.
+        for file in memory.oom_control memory.failcnt memory.usage_in_bytes; do
+            [ ! -r "/dev/memcg/rungic-plasma/$file" ] || {
+                log "memory-counter $file"
+                cat "/dev/memcg/rungic-plasma/$file" >> "$STATE/host.log"
+            }
+        done
+    }
+    trap 'log supervisor-exit; status stopped' EXIT
+    trap 'exit 0' TERM INT
+    failures=0
+    waiting=0
+    alive=0
+    stable=0
+    log supervisor-start
+    while [ -f "$BASE/runtime.enabled" ]; do
+        if [ "$(getprop sys.boot_completed)" != 1 ] || [ ! -d /storage/emulated/0/Android ]; then
+            if [ "$waiting" = 0 ]; then
+                log waiting-for-unlock
+                status waiting-for-unlock
+                waiting=1
+            fi
+            # Waiting for the first unlock is not a failed service start. Do not
+            # spend its restart budget or abandon a phone left locked overnight.
+            sleep 30
+            continue
+        fi
+        # First-run account creation is interactive. Never invent an account or replay installation.
+        if [ ! -f "${STATE%/runtime}/account.json" ] ||
+           ! grep -Eq '"configured"[[:space:]]*:[[:space:]]*true' "${STATE%/runtime}/account.json"; then
+            log account-setup-required
+            status account-setup-required
+            trap - EXIT
+            exit 0
+        fi
+        state=$("$BASE/rungic-plasma" runtime-status 2>/dev/null) || state=unknown
+        case "$state" in
+          RUNNING|STOPPED) ;;
+          *)
+            # A failed probe is not evidence of a dead container. Preserve it.
+            if [ "$waiting" != 2 ]; then log container-state-unavailable; status container-state-unavailable; fi
+            waiting=2
+            sleep 30
+            continue
+            ;;
+        esac
+        waiting=0
+        if [ "$state" = RUNNING ]; then
+            if [ "$alive" = 0 ]; then
+                log container-running
+                status running
+                alive=1
+                stable=$(cut -d . -f 1 /proc/uptime)
+            fi
+            now=$(cut -d . -f 1 /proc/uptime)
+            [ "$((now - stable))" -lt 300 ] || failures=0
+            sleep 10
+            continue
+        fi
+        if [ "$alive" = 1 ]; then
+            log container-exit
+            snapshot
+            alive=0
+        fi
+        [ -f "$BASE/runtime.enabled" ] || break
+        if [ "$failures" -ge 5 ]; then
+            log 'restart-limit reached; explicit start required'
+            status restart-limit
+            trap - EXIT
+            exit 1
+        fi
+        failures=$((failures + 1))
+        status "starting attempt=$failures"
+        log "container-start attempt=$failures"
+        code=0
+        "$BB" timeout 180 "$BASE/rungic-plasma" boot-start >> "$STATE/host.log" 2>&1 || code=$?
+        if [ "$code" -ne 0 ]; then
+            log "start-failed exit=$code"
+            snapshot
+        fi
+        delay=$((3 * failures * failures))
+        [ "$delay" -le 30 ] || delay=30
+        sleep "$delay"
+    done
+    ;;
+ *) echo 'Usage: rungic-runtime boot|start|stop|status' >&2; exit 2;;
+esac

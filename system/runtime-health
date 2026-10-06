@@ -1,0 +1,55 @@
+#!/bin/sh
+# Root system service: protect only the main processes, never every desktop application.
+set -eu
+umask 077
+STATE=/var/lib/rungic-host/runtime
+mkdir -p "$STATE"
+chmod 700 "$STATE"
+if [ -f "$STATE/linux.log" ] && [ "$(wc -c < "$STATE/linux.log")" -ge 65536 ]; then
+    mv -f "$STATE/linux.log" "$STATE/linux.previous.log"
+fi
+boot=$(cat /proc/sys/kernel/random/boot_id)
+for unit in plasma-kwin_wayland.service plasma-plasmashell.service rungic-voice-agent.service; do
+    # One fixed account. systemd is the authority for identity; never use pgrep or a saved PID.
+    properties=$(/usr/bin/rungic-plasma-user-exec systemctl --user show "$unit" \
+        -p MainPID -p ActiveState -p Result -p ExecMainCode -p ExecMainStatus -p NRestarts) || continue
+    signature=$(printf '%s\n' "$properties" | tr '\n' ' ')
+    old=$(cat "$STATE/$unit.state" 2>/dev/null) || old=
+    if [ "$old" != "$boot $signature" ]; then
+        printf '%s boot=%s unit=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$boot" "$unit" "$signature" >> "$STATE/linux.log"
+        printf '%s\n' "$boot $signature" > "$STATE/$unit.state.tmp"
+        mv "$STATE/$unit.state.tmp" "$STATE/$unit.state"
+    fi
+    pid=$(printf '%s\n' "$properties" | sed -n 's/^MainPID=//p')
+    case "$pid" in ''|0|*[!0-9]*) continue;; esac
+    main=$pid
+    candidates=$main
+    # The upstream KWin service's MainPID is its restart wrapper. Select only
+    # its direct compositor child by executable; ordinary desktop clients remain unprotected.
+    if [ "$unit" = plasma-kwin_wayland.service ]; then
+        children=$(cat "/proc/$main/task/$main/children" 2>/dev/null) || children=
+        for child in $children; do
+            case "$child" in ''|*[!0-9]*) continue;; esac
+            [ "$(readlink "/proc/$child/exe" 2>/dev/null)" = /usr/bin/kwin_wayland ] || continue
+            candidates="$candidates $child"
+        done
+    fi
+    for pid in $candidates; do
+        [ -r "/proc/$pid/status" ] || continue
+        uid=$(sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$pid/status")
+        [ "$uid" = 1000 ] || continue
+        adjustment=$(cat "/proc/$pid/oom_score_adj" 2>/dev/null) || continue
+        case "$adjustment" in -[0-9]*|[0-9]*) ;; *) continue;; esac
+        [ "$adjustment" -gt -250 ] || continue
+        # Keep an open handle to the selected process across the recheck (PID reuse cannot redirect it).
+        (
+            exec 3>"/proc/$pid/oom_score_adj" 2>/dev/null || exit 0
+            current=$(/usr/bin/rungic-plasma-user-exec systemctl --user show -P MainPID "$unit") || current=0
+            parent=$(sed -n 's/^PPid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$pid/status" 2>/dev/null) || parent=
+            if [ "$current" = "$main" ] && { [ "$pid" = "$main" ] || [ "$parent" = "$main" ]; }; then
+                printf '%s\n' -250 >&3 || echo "OOM protection refused for $unit" >&2
+            fi
+            exec 3>&-
+        ) || echo "OOM protection skipped for exited $unit" >&2
+    done
+done

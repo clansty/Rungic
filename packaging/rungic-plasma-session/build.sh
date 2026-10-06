@@ -28,3 +28,13 @@ for unit in rungic-plasma-display rungic-plasma-brightness; do
 done
 install -Dm644 "$SRC/desktop/kwin-override.conf" "$DESTDIR/usr/lib/systemd/user/plasma-kwin_wayland.service.d/rungic.conf"
 install -Dm644 "$SRC/system/pulse-override.conf" "$DESTDIR/usr/lib/systemd/user/pulseaudio.service.d/rungic.conf"
+
+install -Dm755 "$SRC/system/runtime-health" "$DESTDIR/usr/libexec/rungic-runtime-health"
+install -Dm755 "$SRC/system/service-exit" "$DESTDIR/usr/libexec/rungic-service-exit"
+for kind in service timer; do
+    install -Dm644 "$SRC/system/rungic-runtime-health.$kind" "$DESTDIR/usr/lib/systemd/system/rungic-runtime-health.$kind"
+done
+for unit in plasma-kwin_wayland plasma-plasmashell rungic-voice-agent; do
+    install -Dm644 "$SRC/system/critical-service.conf" "$DESTDIR/usr/lib/systemd/user/$unit.service.d/runtime.conf"
+    printf '[Service]\nExecStopPost=-/usr/libexec/rungic-service-exit %s\n' "$unit" >> "$DESTDIR/usr/lib/systemd/user/$unit.service.d/runtime.conf"
+done

@@ -1,0 +1,219 @@
+From: Rungic <noreply@rungic.invalid>
+Date: Tue, 6 Oct 2026 09:00:00 +0000
+Subject: Android host: initialize Linux desktop before the first display connection
+
+Keep one configured phone output with its render loop inhibited when no Android
+host exists at startup. Open Linux's render device independently, defer host
+windows and layers, and use the existing reconnect path to attach presentation.
+The ordinary nested Wayland backend still requires its upstream compositor.
+
+Forwarded: not-needed
+Last-Update: 2026-10-06
+X-Rungic-Status: Pending
+X-Rungic-Tests: L3:session.ready
+X-Rungic-Docs: docs/113
+Origin: vendor
+---
+diff --git a/src/backends/wayland/wayland_backend.h b/src/backends/wayland/wayland_backend.h
+--- a/src/backends/wayland/wayland_backend.h
++++ b/src/backends/wayland/wayland_backend.h
+@@ -291,6 +291,8 @@
+     void removeOutput(WaylandOutput *output);
+     /// Settings of the host connection before it is made.
+     virtual void configureDisplay(WaylandDisplay *display);
++    /// Android presentation can be absent on the very first Linux boot.
++    virtual bool allowOfflineStart() const { return false; }
+     /// The render device to open: the host's dmabuf main device upstream.
+     virtual QString renderDevicePath() const;
+     /// Called once the render device is open (e.g. to give it another allocator).
+diff --git a/src/backends/android/android_backend.h b/src/backends/android/android_backend.h
+--- a/src/backends/android/android_backend.h
++++ b/src/backends/android/android_backend.h
+@@ -48,6 +48,7 @@
+     ~AndroidBackend() override;
+ 
+     bool initialize() override;
++    bool allowOfflineStart() const override { return true; }
+     OutputConfigurationError applyOutputChanges(const OutputConfiguration &config) override;
+     int maxLinuxDmabufVersion() const override;
+ 
+diff --git a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -488,7 +488,16 @@
+ bool WaylandBackend::initialize()
+ {
+     if (!connectHost()) {
+-        return false;
++        if (!allowOfflineStart() || m_display) {
++            return false;
++        }
++        // The renderer belongs to Linux. Keep one inhibited phone output, so
++        // Plasma can create its panels before any display client connects.
++        m_drmDevice = DrmDevice::open(renderDevicePath());
++        if (m_drmDevice) {
++            setUpRenderDevice(m_drmDevice.get());
++        }
++        createOutputs();
+     }
+ 
+     connect(this, &WaylandBackend::pointerLockChanged, this, [this](bool locked) {
+@@ -606,7 +615,7 @@
+     waylandOutput->init(size, scale, fullscreen);
+ 
+     // Wait until the output window is configured by the host compositor.
+-    while (!waylandOutput->isReady()) {
++    while (m_display && !waylandOutput->isReady()) {
+         wl_display_roundtrip(m_display->nativeDisplay());
+     }
+ 
+@@ -735,7 +744,7 @@
+ 
+ bool WaylandBackend::supportsPointerLock()
+ {
+-    return m_display->pointerConstraints() && m_display->relativePointerManager();
++    return m_display && m_display->pointerConstraints() && m_display->relativePointerManager();
+ }
+ 
+ void WaylandBackend::togglePointerLock()
+@@ -763,7 +772,7 @@
+ QList<CompositingType> WaylandBackend::supportedCompositors() const
+ {
+     QList<CompositingType> ret;
+-    if (m_display->linuxDmabuf() && m_drmDevice) {
++    if (m_drmDevice && ((!m_display && allowOfflineStart()) || (m_display && m_display->linuxDmabuf()))) {
+         ret.append(OpenGLCompositing);
+     }
+     ret.append(QPainterCompositing);
+@@ -819,6 +828,9 @@
+ 
+ wl_buffer *WaylandBackend::importBuffer(GraphicsBuffer *graphicsBuffer)
+ {
++    if (!m_display) {
++        return nullptr;
++    }
+     auto &buffer = m_buffers[graphicsBuffer];
+     if (!buffer) {
+         wl_buffer *handle = nullptr;
+diff --git a/src/backends/android/android_backend.cpp b/src/backends/android/android_backend.cpp
+--- a/src/backends/android/android_backend.cpp
++++ b/src/backends/android/android_backend.cpp
+@@ -74,6 +74,12 @@
+     if (!WaylandBackend::initialize()) {
+         return false;
+     }
++    if (!display()) {
++        m_reconnecting = true;
++        m_reconnectTimer.start();
++        qCInfo(KWIN_WAYLAND_BACKEND) << "Desktop initialized without an Android display client";
++        return true;
++    }
+     bindHostGlobals();
+     if (m_textInputManager) {
+         m_textInput = std::make_unique<HostTextInput>(m_textInputManager, *display()->seat());
+@@ -224,7 +230,7 @@
+     connect(display, &Wayland::WaylandDisplay::globalRemoved, this, &AndroidBackend::handleGlobalRemoved);
+     // The first connection waits for a host that may still be starting; a reconnection is only
+     // tried once the host's socket answers (reconnectHost), so nothing blocks the session.
+-    display->setConnectTimeout(m_initialized || m_reconnecting ? std::chrono::seconds(0) : std::chrono::seconds(60));
++    display->setConnectTimeout(std::chrono::seconds(0));
+     display->setConnectionLostHandler([this]() {
+         // Called while dispatching the lost connection: leave it before tearing anything down.
+         QTimer::singleShot(0, this, &AndroidBackend::hostLost);
+diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+--- a/src/backends/wayland/wayland_output.cpp
++++ b/src/backends/wayland/wayland_output.cpp
+@@ -129,7 +129,7 @@
+ {
+     m_renderLoop->setMaxPendingFrameCount(2);
+     Capabilities caps = Capability::Dpms;
+-    if (backend->display()->tearingControl()) {
++    if (backend->display() && backend->display()->tearingControl()) {
+         caps |= Capability::Tearing;
+     }
+     setInformation(Information{
+@@ -143,7 +143,12 @@
+         applyConfigure(m_pendingConfigureSize, m_pendingConfigureSerial);
+     });
+ 
+-    createHostWindow();
++    if (backend->display()) {
++        createHostWindow();
++    } else {
++        m_hostBound = false;
++        m_renderLoop->inhibit();
++    }
+     connect(this, &WaylandOutput::enabledChanged, this, &WaylandOutput::updateWindowTitle);
+     connect(this, &WaylandOutput::dpmsModeChanged, this, &WaylandOutput::updateWindowTitle);
+ }
+@@ -588,6 +593,10 @@
+     setState(initialState);
+ 
+     m_fullscreen = fullscreen;
++    if (!m_hostBound) {
++        m_ready = true; // Linux output configured; presentation is attached later.
++        return;
++    }
+     if (fullscreen && m_fullscreenOn) {
+         xdg_toplevel_set_fullscreen(*m_xdgShellSurface, m_fullscreenOn);
+     } else {
+diff --git a/src/backends/wayland/wayland_layer.cpp b/src/backends/wayland/wayland_layer.cpp
+--- a/src/backends/wayland/wayland_layer.cpp
++++ b/src/backends/wayland/wayland_layer.cpp
+@@ -41,6 +41,9 @@
+ {
+     const auto output = static_cast<WaylandOutput *>(m_output.get());
+     const auto display = output->backend()->display();
++    if (!display || !output->surface()) {
++        return;
++    }
+     m_surface.reset(display->compositor()->createSurface());
+     m_subSurface.reset(display->subCompositor()->createSubSurface(m_surface.get(), output->surface()));
+     // make presentation atomic with WaylandOutput::present
+diff --git a/src/backends/wayland/wayland_egl_backend.cpp b/src/backends/wayland/wayland_egl_backend.cpp
+--- a/src/backends/wayland/wayland_egl_backend.cpp
++++ b/src/backends/wayland/wayland_egl_backend.cpp
+@@ -163,7 +163,8 @@
+ 
+ QHash<uint32_t, QList<uint64_t>> WaylandEglLayer::supportedDrmFormats() const
+ {
+-    return m_backend->backend()->display()->linuxDmabuf()->formats();
++    const auto display = m_backend->backend()->display();
++    return display && display->linuxDmabuf() ? display->linuxDmabuf()->formats() : QHash<uint32_t, QList<uint64_t>>{};
+ }
+ 
+ void WaylandEglLayer::releaseBuffers()
+@@ -305,11 +306,15 @@
+     const auto waylandOutput = static_cast<WaylandOutput *>(output);
+     std::vector<std::unique_ptr<OutputLayer>> layers;
+     auto primary = std::make_unique<WaylandEglLayer>(waylandOutput, this, OutputLayerType::Primary, 0);
+-    primary->subSurface()->placeAbove(waylandOutput->surface());
++    if (primary->subSurface()) {
++        primary->subSurface()->placeAbove(waylandOutput->surface());
++    }
+     layers.push_back(std::move(primary));
+     for (int z = 1; z < (waylandOutput->singleSurface() ? 1 : 5); z++) {
+         auto layer = std::make_unique<WaylandEglLayer>(waylandOutput, this, OutputLayerType::GenericLayer, z);
+-        layer->subSurface()->placeAbove(static_cast<WaylandEglLayer *>(layers.back().get())->surface());
++        if (layer->subSurface()) {
++            layer->subSurface()->placeAbove(static_cast<WaylandEglLayer *>(layers.back().get())->surface());
++        }
+         layers.push_back(std::move(layer));
+     }
+     // Without a cursor layer KWin renders the cursor into the frame.
+diff --git a/src/backends/wayland/wayland_display.cpp b/src/backends/wayland/wayland_display.cpp
+--- a/src/backends/wayland/wayland_display.cpp
++++ b/src/backends/wayland/wayland_display.cpp
+@@ -195,8 +195,10 @@
+ 
+ WaylandDisplay::~WaylandDisplay()
+ {
+-    m_eventThread->stop();
+-    m_eventThread.reset();
++    if (m_eventThread) {
++        m_eventThread->stop();
++        m_eventThread.reset();
++    }
+ 
+     m_compositor.reset();
+     m_subCompositor.reset();

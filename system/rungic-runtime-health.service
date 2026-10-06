@@ -1,0 +1,9 @@
+[Unit]
+Description=Record Rungic service lifecycle and protect critical main processes
+After=rungic-agent-user.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rungic-runtime-health
+TimeoutStartSec=20
+UMask=0077
