@@ -30,6 +30,9 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     private String presenterOwner;
     private CastControls castControls;
     private StartupScreen loading;
+    // The desktop's last frame, shown while the app comes back to the front until the desktop's
+    // next one: the surface is gone while the app is away, and the session is not (docs/96).
+    private android.widget.ImageView snapshot;
     private final java.util.concurrent.atomic.AtomicBoolean startupBusy=new java.util.concurrent.atomic.AtomicBoolean();
     private volatile int surfaceGeneration;
     private boolean awaitingFrame;
@@ -44,9 +47,10 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         @Override public void run() {
             if(isDestroyed() || !started || frameGeneration!=surfaceGeneration) { awaitingFrame=false; return; }
             if(NativeBridge.isPhoneFrameReady(frameTicket)) {
-                awaitingFrame=false; loading.setVisibility(View.GONE); notifyState(getString(R.string.state_running));
+                awaitingFrame=false; loading.setVisibility(View.GONE); hideSnapshot(); notifyState(getString(R.string.state_running));
+                Log.i("RungicWayland","desktop frame "+(android.os.SystemClock.uptimeMillis()-surfaceAt)+" ms after the surface");
             } else if(android.os.SystemClock.uptimeMillis()>frameDeadline) {
-                awaitingFrame=false; NativeBridge.cancelPhoneFrame(frameTicket);
+                awaitingFrame=false; NativeBridge.cancelPhoneFrame(frameTicket); hideSnapshot();
                 showProblem(getString(R.string.display_unconfirmed), getString(R.string.display_unconfirmed_details), true);
             } else display.postDelayed(this,100);
         }
@@ -97,6 +101,10 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
             if(display.getHolder().getSurface().isValid())surfaceCreated(display.getHolder());
         },() -> moveTaskToBack(true));
         loading.show(getString(R.string.state_preparing),getString(R.string.please_wait),true,false,"");
+        snapshot=new android.widget.ImageView(this);
+        snapshot.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+        snapshot.setVisibility(View.GONE);
+        frame.addView(snapshot,new FrameLayout.LayoutParams(-1,-1));
         frame.addView(loading,new FrameLayout.LayoutParams(-1,-1));
         setContentView(frame);
         castControls = new CastControls(this, frame, this::setAndroidKeyboard);
@@ -216,6 +224,10 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
             else if(!accountReady)display.post(installPoll);
         }
     }
+    @Override public void onPause() {
+        keepLastFrame();
+        super.onPause();
+    }
     @Override public void onStop() {
         started = false;
         if(display!=null) { display.removeCallbacks(installPoll); display.removeCallbacks(framePoll); }
@@ -308,7 +320,9 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         }
     }
 
+    private long surfaceAt;
     @Override public void surfaceCreated(SurfaceHolder holder) {
+        surfaceAt=android.os.SystemClock.uptimeMillis();
         pacer.start();
         if(awaitingFrame || !startupBusy.compareAndSet(false,true))return;
         final int generation=surfaceGeneration;
@@ -374,7 +388,11 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
                         return;
                     }
                 }
-                runOnUiThread(() -> showLoading(getString(R.string.starting_desktop)));
+                // Back to the front of a desktop this process already shows: the session is running
+                // (it outlives the app, docs/96), so the desktop's next frame is all that is waited
+                // for, behind its last one; the controller's checks run after it (resumeChecks).
+                final boolean resume=initialized;
+                runOnUiThread(() -> { if(resume)showSnapshot(); else showLoading(getString(R.string.starting_desktop)); });
                 KeyboardAssets.ensure(getApplicationContext());
                 new File(getFilesDir(), "tmp").mkdirs();
                 platform.start();
@@ -409,7 +427,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
                 // KWin now keeps the session while the host is away and reconnects by itself, so
                 // the windows survive the app being closed or killed; start only makes sure the
                 // container and session run (the controller restarts a failed session).
-                control("start");
+                if(!resume)control("start");
                 Log.i("RungicWayland", NativeBridge.getWaylandRuntimeStats());
                 long ticket=NativeBridge.requestPhoneFrame();
                 if(ticket==0)throw new IOException("无法请求显示状态");
@@ -417,12 +435,13 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
                     if(isDestroyed() || generation!=surfaceGeneration) {
                         NativeBridge.cancelPhoneFrame(ticket); return;
                     }
-                    showLoading(getString(R.string.waiting_frame));
+                    if(!resume)showLoading(getString(R.string.waiting_frame));
                     frameTicket=ticket; frameGeneration=generation;
                     frameDeadline=android.os.SystemClock.uptimeMillis()+60000;
                     awaitingFrame=true;
                     if(started)display.post(framePoll);
                 });
+                if(resume)resumeChecks();
             } catch (Throwable e) {
                 Log.e("RungicWayland", "Start failed", e);
                 runOnUiThread(() -> {
@@ -438,6 +457,36 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
 
     private void notifyState(String message) {
         if(!message.equals(notificationState)) { notificationState=message; DesktopService.update(this,message); }
+    }
+    /** What start does on a resume, off the display's path: the controller restarts a failed
+     *  session and the hardware backends that stopped (a frame that does not come waits for it). */
+    private void resumeChecks() {
+        Thread checks=new Thread(() -> {
+            try { control("start"); }
+            catch(Exception e) { Log.w("RungicWayland","Checks after the return to the front failed",e); }
+        },"rungic-resume-checks");
+        checks.setDaemon(true);checks.start();
+    }
+    /** Keeps the desktop's last frame for the return to the front (the surface is still there). */
+    private void keepLastFrame() {
+        if(!initialized || display==null || !display.getHolder().getSurface().isValid())return;
+        try {
+            android.graphics.Bitmap bitmap=android.graphics.Bitmap.createBitmap(Math.max(1,display.getWidth()/2),
+                Math.max(1,display.getHeight()/2),android.graphics.Bitmap.Config.ARGB_8888);
+            android.view.PixelCopy.request(display,bitmap,result -> {
+                if(result==android.view.PixelCopy.SUCCESS && !isDestroyed())snapshot.setImageBitmap(bitmap);
+                else bitmap.recycle();
+            },new android.os.Handler(android.os.Looper.getMainLooper()));
+        } catch(RuntimeException e) { Log.w("RungicWayland","Last frame not kept",e); }
+    }
+    private void showSnapshot() {
+        if(isDestroyed())return;
+        if(snapshot.getDrawable()!=null)snapshot.setVisibility(View.VISIBLE);
+        loading.setVisibility(View.GONE);
+    }
+    private void hideSnapshot() {
+        snapshot.setVisibility(View.GONE);
+        snapshot.setImageDrawable(null);
     }
     private void showLoading(String message) {
         if(isDestroyed())return;

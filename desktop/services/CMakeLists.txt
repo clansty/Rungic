@@ -9,12 +9,12 @@ include(KDEInstallDirs)
 include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Network Quick Qml)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core DBus Network Quick Qml)
 find_package(KF6 6.0 REQUIRED COMPONENTS KCMUtils Auth CoreAddons I18n)
 
 kcmutils_add_qml_kcm(kcm_rungic_services SOURCES servicessettings.cpp)
 target_link_libraries(kcm_rungic_services PRIVATE
-    Qt::Core Qt::Network Qt::Quick Qt::Qml
+    Qt::Core Qt::DBus Qt::Network Qt::Quick Qt::Qml
     KF6::KCMUtilsQuick KF6::CoreAddons KF6::AuthCore KF6::I18n)
 # The page's QML is loaded with the plugin id as its translation domain (KQuickConfigModule).
 target_compile_definitions(kcm_rungic_services PRIVATE TRANSLATION_DOMAIN="kcm_rungic_services")

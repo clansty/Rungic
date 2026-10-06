@@ -11,6 +11,9 @@
 #include <KQuickConfigModule>
 #include <KUser>
 
+#include <QDBusArgument>
+#include <QDBusInterface>
+#include <QDBusReply>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -99,6 +102,49 @@ QStringList masksIn(const QString &directory)
     }
     return result;
 }
+}
+
+// The phone's IPv4 addresses as NetworkManager has them (the Android network bridge): where the
+// local network reaches SSH. With Linux's own network (docs/116) Linux's interfaces show only
+// pasta's internal link; pasta forwards port 22 from the phone's addresses. -> "address  interface".
+static QStringList phoneAddresses()
+{
+    QStringList result;
+    const auto nm = u"org.freedesktop.NetworkManager"_s;
+    QDBusInterface manager(nm, u"/org/freedesktop/NetworkManager"_s, nm, QDBusConnection::systemBus());
+    if (!manager.isValid()) {
+        return result;
+    }
+    const QDBusReply<QList<QDBusObjectPath>> devices = manager.call(u"GetDevices"_s);
+    if (!devices.isValid()) {
+        return result;
+    }
+    for (const auto &device : devices.value()) {
+        QDBusInterface properties(nm, device.path(), u"org.freedesktop.DBus.Properties"_s, QDBusConnection::systemBus());
+        const QDBusReply<QDBusVariant> name = properties.call(u"Get"_s, nm + u".Device"_s, u"Interface"_s);
+        const QDBusReply<QDBusVariant> config = properties.call(u"Get"_s, nm + u".Device"_s, u"Ip4Config"_s);
+        if (!name.isValid() || !config.isValid()) {
+            continue;
+        }
+        const auto path = qvariant_cast<QDBusObjectPath>(config.value().variant()).path();
+        if (path.isEmpty() || path == u"/"_s) {
+            continue;
+        }
+        QDBusInterface ip4(nm, path, u"org.freedesktop.DBus.Properties"_s, QDBusConnection::systemBus());
+        const QDBusReply<QDBusVariant> data = ip4.call(u"Get"_s, nm + u".IP4Config"_s, u"AddressData"_s);
+        if (!data.isValid()) {
+            continue;
+        }
+        QList<QVariantMap> entries;
+        data.value().variant().value<QDBusArgument>() >> entries;
+        for (const auto &entry : entries) {
+            const auto address = entry.value(u"address"_s).toString();
+            if (!address.isEmpty()) {
+                result << u"%1  %2"_s.arg(address, name.value().variant().toString());
+            }
+        }
+    }
+    return result;
 }
 
 class ServicesSettings : public KQuickConfigModule
@@ -228,14 +274,15 @@ public:
             }
         }
 
-        m_addresses.clear();
-        for (const auto &interface : QNetworkInterface::allInterfaces()) {
+        m_addresses = phoneAddresses();
+        for (const auto &interface : m_addresses.isEmpty() ? QNetworkInterface::allInterfaces() : QList<QNetworkInterface>{}) {
             const auto flags = interface.flags();
             if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning) || (flags & QNetworkInterface::IsLoopBack)) {
                 continue;
             }
             for (const auto &entry : interface.addressEntries()) {
-                if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                // Not the link of Linux's own network (docs/116): only Android reaches that address.
+                if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol && entry.ip().toString() != u"10.0.2.15"_s) {
                     m_addresses << u"%1  %2"_s.arg(entry.ip().toString(), interface.name());
                 }
             }
