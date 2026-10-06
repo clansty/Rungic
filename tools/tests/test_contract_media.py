@@ -253,3 +253,17 @@ def test_the_android_microphone_is_open_only_while_android_permits(monkeypatch, 
     assert [r for r in capture.requests if r['op'] == 'microphone'] == [{'op': 'microphone'}] * 2
     assert {'op': 'capture-info'} in android.requests
     assert android.problems == [] and capture.problems == []
+
+
+# covers: desktop.host-bridges/E6
+def test_capture_goes_to_the_media_backend_and_to_an_older_app_without_it(monkeypatch, tmp_path):
+    module = media_bridge(monkeypatch, tmp_path)
+    monkeypatch.delenv('RUNGIC_CAPTURE_SOCKET', raising=False)
+    backend, app = tmp_path / 'media/capture.sock', tmp_path / 'app/capture.sock'
+    monkeypatch.setattr(module, 'CAPTURE_SOCKETS', (str(backend), str(app)))
+    app.parent.mkdir(); app.touch()
+    assert module.capture_socket() == str(app)        # an app from before the backend
+    backend.parent.mkdir(); backend.touch()
+    assert module.capture_socket() == str(backend)    # the backend's, whatever the app
+    monkeypatch.setenv('RUNGIC_CAPTURE_SOCKET', '/run/stand-in.sock')
+    assert module.capture_socket() == '/run/stand-in.sock'

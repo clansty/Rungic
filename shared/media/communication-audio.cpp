@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalServer>
@@ -20,6 +21,14 @@
 #include <sys/stat.h>
 
 static QByteArray json(const QJsonObject &o) { return QJsonDocument(o).toJson(QJsonDocument::Compact)+'\n'; }
+// The media backend's capture socket (MediaDaemon, docs/117), else the app's own (an app from before
+// it); another one only for a stand-in (tools/system/tests).
+static QString captureSocket() {
+    const QByteArray chosen=qgetenv("RUNGIC_CAPTURE_SOCKET");
+    if(!chosen.isEmpty())return QString::fromLocal8Bit(chosen);
+    const QString backend=QStringLiteral("/var/lib/rungic-host/media/capture.sock");
+    return QFile::exists(backend)?backend:QStringLiteral("/mnt/android-wayland/capture.sock");
+}
 static void reply(QLocalSocket *s, QJsonObject o) { if(s && s->state()==QLocalSocket::ConnectedState) s->write(json(o)); }
 static QByteArray pcm(GstAppSink *sink, quint64 *epoch=nullptr) {
     GstSample *sample=gst_app_sink_pull_sample(sink); if(!sample)return {};
@@ -145,7 +154,7 @@ public:
         });
         connect(s,&QLocalSocket::disconnected,this,[this,s]{if(!closing&&(s==output||s==control||s==mic))fail("Communication audio disconnected");});
         connect(s,&QLocalSocket::errorOccurred,this,[this,s](QLocalSocket::LocalSocketError){if(!closing&&(s==output||s==control||s==mic))fail("Android communication backend is unavailable");});
-        s->connectToServer("/mnt/android-wayland/capture.sock");return s;
+        s->connectToServer(captureSocket());return s;
     }
     bool dsp(bool hardwareAEC) {
         if(pipeline)return true;

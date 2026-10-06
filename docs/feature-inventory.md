@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 164 条功能、717 条体验，其中 674 条有检查。
+共 164 条功能、719 条体验，其中 676 条有检查。
 
 ## Agent 能力
 
@@ -2401,19 +2401,21 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 - **E3** 在 Linux 里打开或关闭 Wi-Fi，安卓的 Wi-Fi 跟着变，显示状态以安卓随后读数为准。（单元测试）
 - **E4** 安卓网络变化后很快反映到 Linux，而且不靠高频轮询（SSID 与信号正常，空闲时无持续开销）。（单元测试、人工）
 - **E5** 安卓接口异常或超时时状态变为未知，不继续显示过期的“已连接”。不支持的操作明确返回 NotSupported，不伪造成功。（单元测试）
-- **E6** Linux 程序的域名解析跟随安卓当前默认网络（开 VPN 时用 VPN 的 DNS）：/etc/resolv.conf 随网络变化原子更新，断网时不保留已失效的服务器。安卓侧连不上时保持原样。（单元测试）
+- **E6** Linux 程序的域名解析跟随安卓当前默认网络（开 VPN 时用 VPN 的 DNS）：/etc/resolv.conf 随网络变化原子更新。解析器任何时候都不留空：安卓侧连不上、刚开机还没有快照或一时没有默认网络时，沿用最近一次安卓给的 DNS（存在磁盘上，重启后也在）；从来没有过时用 Linux 能看到的默认网关（Wi-Fi 优先），安卓给出真实值后替换。（单元测试）
 - **E7** 用户手工写的 /etc/resolv.conf（没有 Rungic 标记行）或符号链接不被覆盖。（单元测试）
 - **E8** 手机显示 APK 不在时，网络状态与事件仍由独立硬件后端提供；故障明确报错，不重复提交操作。（单元测试）
+- **E9** “独立网络”服务（默认打开）：Linux 有自己的网络命名空间，由 pasta 以 Rungic 应用的安卓 uid 替它联网，安卓和 VPN 应用把 Linux 当成 Rungic 应用（走 VPN、用 VPN 的 DNS、守分应用规则）。局域网 SSH、访问安卓服务的抽象 socket 与本机端口照常可用；强行停止 App 不影响网络。关掉后下次启动 Linux 时回到共享安卓的网络。（单元测试、人工）
 
 注意：
 - 镜像只带一行占位注释的 /etc/resolv.conf，原先没有任何机制写入 DNS，新装设备的 Linux 程序解析不了域名（issue [docs/research/32-network-integration.md](../docs/research/32-network-integration.md)
+- 共用安卓的网络时，Linux 的连接带着 uid 0、1000 进入安卓网络栈，安卓和 VPN 应用按系统身份处理。用户手机开 Clash 全局 VPN 时 root 的 TLS 失败而应用正常（2026-10-06）。独立网络让 Linux 以 Rungic 应用的身份联网；抽象 socket 属于网络命名空间，要中转。 [docs/116-own-network.md](../docs/116-own-network.md)
 - 没有 Linux NetworkManager 守护进程、wpa_supplicant 或 DHCP。安卓独占网卡、路由、DNS 与凭据。在服务页打开 NetworkManager 等服务可能抢走网卡、断开无线调试。 [docs/research/32-network-integration.md](../docs/research/32-network-integration.md) [docs/83-service-policy.md](../docs/83-service-policy.md)
 - 普通安卓 API 会脱敏 SSID/BSSID，靠白名单 root cmd wifi 补齐。固定安卓 16 的输出格式，换 ROM 要重验。 [docs/research/32-network-integration.md](../docs/research/32-network-integration.md)
 - ModemManagerQt 等客户端只在服务已存在时订阅 InterfacesAdded，桥接服务要先发布对象再占用总线名。 [docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)
 - 实际连接新网络未在实机验证：离开当前 Wi-Fi 会断开 adb。设置页启动时曾短暂看到临时连接 Settings/wifi，待查。 [docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)
 - ObjectManager 在 /org/freedesktop，Manager 在 /org/freedesktop/NetworkManager，两个路径不能混淆。 [docs/research/32-network-integration.md](../docs/research/32-network-integration.md)
 
-文档：[docs/research/32-network-integration.md](../docs/research/32-network-integration.md)、[docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)
+文档：[docs/research/32-network-integration.md](../docs/research/32-network-integration.md)、[docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)、[docs/116-own-network.md](../docs/116-own-network.md)
 
 #### 蓝牙
 
@@ -2472,13 +2474,15 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 - **E1** 安卓状态变化时，watch 在版本号变化时立即返回，服务取完整状态。没有变化时最长 60 秒兜底一次。（单元测试、人工）
 - **E2** 遇到不支持 watch 的旧 APK，服务退回原来的轮询间隔继续工作。（单元测试）
 - **E3** 各后端每次启动换 epoch，看到旧 epoch 的服务会重新取状态。平台 socket 只接受 UID 0/1000 的请求。（单元测试）
-- **E4** 网络、蓝牙、SIM 和短信经独立硬件端点。显示、触摸和相机等界面能力经显示宿主端点。（单元测试）
+- **E4** 网络、蓝牙、SIM 和短信经独立硬件端点。显示、触摸等界面能力经显示宿主端点；麦克风、相机和手机外放经独立媒体端点（E6）。（单元测试）
 - **E5** 独立后端退出后有限恢复，退出记录有界落盘。不能重启健康的容器或重放短信。（单元测试）
+- **E6** 麦克风、相机、手机外放和 Agent 通话的声音由独立媒体后端提供（root 进程，不在 App 里）。App 被隐藏、冻结或强行停止时，进行中的 Agent 通话照常进行；App 回来后重新连上。桌面的麦克风和相机仍只在用户给了 Rungic 权限、桌面在前台时使用；App 不在时按不在前台处理。（单元测试、人工）
 
 注意：
+- root 进程用 CameraManager.openCamera 时，框架会读一项开发者设置；ActivityManager 不认识的进程读不了（SecurityException），要先预置框架里缓存它的静态字段。 [docs/117-media-backend.md](../docs/117-media-backend.md)
 - 平台桥只在 APK 私有目录，校验对端 UID。剪贴板后端走抽象 Unix socket，依赖 LXC 与安卓共享网络命名空间，仍须校验对端 UID。 [docs/research/31-backend-integration.md](../docs/research/31-backend-integration.md) [docs/research/clipboard-background.md](../docs/research/clipboard-background.md)
 
-文档：[docs/49-plasma-performance.md](../docs/49-plasma-performance.md)、[docs/research/30-feature-adaptation.md](../docs/research/30-feature-adaptation.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)
+文档：[docs/49-plasma-performance.md](../docs/49-plasma-performance.md)、[docs/research/30-feature-adaptation.md](../docs/research/30-feature-adaptation.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)、[docs/117-media-backend.md](../docs/117-media-backend.md)
 
 ### 设置与管理手机里的电脑
 

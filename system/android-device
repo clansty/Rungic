@@ -1,15 +1,23 @@
 #!/system/bin/sh
 # Independently supervised hardware backend; no Activity, container restart or operation replay.
+# Installed as android-device (the device backend, DeviceDaemon) and as android-media (the media
+# backend, MediaDaemon, docs/117): the same supervision, chosen by the name it runs as.
 set -eu
 BASE=/data/adb/rungic-plasma
-STATE=/data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/device
 BB=/data/adb/magisk/busybox
-CLASS=com.rungic.plasma.DeviceDaemon
+NAME=${0##*/}
+case "$NAME" in
+  android-media) NAME=media; CLASS=com.rungic.plasma.MediaDaemon
+    # The Linux desktop user reaches capture.sock in it (the backend checks who connects).
+    MODE=711;;
+  *) NAME=device; CLASS=com.rungic.plasma.DeviceDaemon; MODE=700;;
+esac
+STATE=/data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/$NAME
 [ "$(id -u)" = 0 ] || exit 1
 mkdir -p "$STATE"
-chmod 700 "$STATE"
+chmod "$MODE" "$STATE"
 log() {
-    # Only lifecycle metadata, never requests, phone numbers, message text or Wi-Fi credentials.
+    # Only lifecycle metadata, never requests, phone numbers, message text, Wi-Fi credentials or media.
     if [ -f "$STATE/lifecycle.log" ] && [ "$(wc -c < "$STATE/lifecycle.log")" -gt 65536 ]; then
         mv -f "$STATE/lifecycle.log" "$STATE/lifecycle.previous.log"
     fi
@@ -36,31 +44,31 @@ detach_app_cgroups() {
 case "${1:-start}" in
  start)
     current=$(pm path com.rungic.plasma 2>&1 | sed -n 's/^package://p' | head -n 1)
-    previous=$(cat "$BASE/device-apk" 2>/dev/null) || previous=
+    previous=$(cat "$BASE/$NAME-apk" 2>/dev/null) || previous=
     [ "$current" = "$previous" ] || stop_daemon
-    touch "$BASE/device.enabled"
-    "$BB" setsid "$BB" flock -n "$BASE/device-watch.lock" "$BASE/android-device" watch </dev/null >/dev/null 2>&1 &
+    touch "$BASE/$NAME.enabled"
+    "$BB" setsid "$BB" flock -n "$BASE/$NAME-watch.lock" "$BASE/android-$NAME" watch </dev/null >/dev/null 2>&1 &
     ;;
  watch)
     detach_app_cgroups
     failures=0
     trap 'stop_daemon; log supervisor-stopped' EXIT
     trap 'exit 0' TERM INT
-    while [ -f "$BASE/device.enabled" ]; do
+    while [ -f "$BASE/$NAME.enabled" ]; do
         apk=$(pm path com.rungic.plasma 2>&1 | sed -n 's/^package://p' | head -n 1)
         uid=$(stat -c %u /data/user/0/com.rungic.plasma 2>/dev/null) || uid=0
         started=$(date +%s)
         log 'backend-start'
         code=1
         if [ -n "$apk" ] && [ "$uid" -ge 10000 ]; then
-            printf '%s\n' "$apk" > "$BASE/device-apk"
+            printf '%s\n' "$apk" > "$BASE/$NAME-apk"
             cd "$STATE"
             # Code packaging stays in the installed APK. Process UID/cgroup/lifetime do not.
             CLASSPATH="$apk" app_process /system/bin "$CLASS" "$uid" "$apk" >/dev/null 2>&1 && code=0 || code=$?
         fi
         ended=$(date +%s)
         log "backend-exit code=$code duration=$((ended - started))"
-        [ -f "$BASE/device.enabled" ] || break
+        [ -f "$BASE/$NAME.enabled" ] || break
         [ "$((ended - started))" -lt 60 ] || failures=0
         failures=$((failures + 1))
         if [ "$failures" -ge 5 ]; then
@@ -73,9 +81,9 @@ case "${1:-start}" in
     done
     ;;
  stop)
-    rm -f "$BASE/device.enabled"
+    rm -f "$BASE/$NAME.enabled"
     stop_daemon
-    "$BB" timeout 40 "$BB" flock "$BASE/device-watch.lock" true
+    "$BB" timeout 40 "$BB" flock "$BASE/$NAME-watch.lock" true
     ;;
- *) echo 'Usage: android-device start|stop' >&2; exit 2;;
+ *) echo "Usage: android-$NAME start|stop" >&2; exit 2;;
 esac

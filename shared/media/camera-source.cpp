@@ -87,9 +87,11 @@ static void capture(Source *s) {
             if(fd<0)throw std::runtime_error("Cannot create camera socket");
             s->fd=fd;
             sockaddr_un address{};address.sun_family=AF_UNIX;
-            // The app's capture socket; another one only for a stand-in (tools/system/tests).
+            // The media backend's capture socket (docs/117), else the app's own (an app from before
+            // it); another one only for a stand-in (tools/system/tests).
             const char *path=getenv("RUNGIC_CAPTURE_SOCKET");
-            if(!path || !*path)path="/mnt/android-wayland/capture.sock";
+            if(!path || !*path)path=access("/var/lib/rungic-host/media/capture.sock",F_OK)==0
+                ?"/var/lib/rungic-host/media/capture.sock":"/mnt/android-wayland/capture.sock";
             if(strlen(path)>=sizeof(address.sun_path))throw std::runtime_error("Camera socket path too long");
             strcpy(address.sun_path,path);
             timeval timeout{50,0};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));

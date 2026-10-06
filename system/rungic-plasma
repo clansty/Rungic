@@ -154,6 +154,28 @@ desktop_boost() {
     echo "$min" > "$CPUCTL/cpu.uclamp.min"
     echo "$shares" > "$CPUCTL/cpu.shares"
 }
+# Linux's own network (docs/116, Settings -> Services): pasta, as the Rungic app's Android uid,
+# makes the connections of the container's own network namespace, and relays the abstract sockets
+# Linux uses to reach Android's services. In the container's mount and PID namespaces (its python,
+# its /proc), Android's network namespace, as root; detached, so it outlives the app's process,
+# and without the caller's output pipes, which it would hold open (the app reads them to the end).
+own_network_start() {
+    pid= uid=
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      pid=$("$ENTER" /usr/bin/lxc-info -n plasma -pH 2>/dev/null) || pid=
+      case "$pid" in ''|*[!0-9]*) sleep 0.5;; *) break;; esac
+    done
+    uid=$(stat -c %u /data/user/0/com.rungic.plasma 2>/dev/null) || uid=
+    case "$pid" in ''|*[!0-9]*) pid=;; esac
+    case "$uid" in ''|*[!0-9]*) uid=;; esac
+    if [ -z "$pid" ] || [ -z "$uid" ]; then
+      echo 'Own network: container or app uid not found; Linux shares the network at its next start' >&2
+      touch "$HOST_STATE/network-mode.failed"; return 0
+    fi
+    nsenter -t "$pid" -m -p -- /usr/bin/env PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/setsid -f /bin/sh -c \
+      'mkdir -p /var/log/plasma; exec /usr/libexec/rungic-own-network host --app-uid "$1" >>/var/log/plasma/own-network.log 2>&1' \
+      sh "$uid" 9>&- </dev/null >/dev/null 2>&1 || touch "$HOST_STATE/network-mode.failed"
+}
 start_container() {
     # Recreate the shared folder after storage becomes available (including an
     # Android storage remount). Never create it below an unavailable mount.
@@ -198,11 +220,19 @@ start_container() {
         set -- "$@" -s "lxc.mount.entry=/var/lib/lxc/plasma/state/${pair%%:*} ${pair#*:} none bind,create=dir 0 0"
       done
     fi
+    # Linux's own network (docs/116): the switch is the container's (rungic-network-mode writes it
+    # to state/host). After a start that failed to set it up, Linux shares Android's network once.
+    own_network=
+    if [ "$(cat "$HOST_STATE/network-mode" 2>/dev/null)" = own ]; then
+      if [ -e "$HOST_STATE/network-mode.failed" ]; then rm -f "$HOST_STATE/network-mode.failed"
+      else own_network=1; set -- "$@" -s lxc.net.0.type=empty; fi
+    fi
     # Android apps inherit umask 077. LXC 6 creates its payload cgroup with
     # mkdir(0755), so that mask makes the container's cgroup root inaccessible
     # to systemd --user. Scope the normal system mask to the container launcher;
     # retain the caller's private mask for controller files and credentials.
     (umask 022; "$ENTER" /usr/bin/lxc-start -n plasma -d -l INFO -o /var/log/lxc/plasma.log "$@" 9>&-)
+    [ -z "$own_network" ] || own_network_start
 }
 case "$action" in
   account-status)
@@ -320,7 +350,7 @@ case "$action" in
     flock 9 9>&9
     if [ "$action" = stop ]; then
       [ ! -x "$BASE/rungic-runtime" ] || "$BASE/rungic-runtime" stop 9>&-
-      [ ! -x "$BASE/android-media" ] || "$BASE/android-media" stop 9>&-
+      "$BASE/android-media" stop 9>&-
       "$BASE/android-device" stop 9>&-
       "$BASE/android-calls" stop 9>&-
       "$BASE/android-clipboard" stop 9>&-
@@ -334,9 +364,10 @@ case "$action" in
     "$BASE/android-audio" start 9>&-
     startup_phase=android-device
     "$BASE/android-device" start 9>&-
+    startup_phase=android-media
+    "$BASE/android-media" start 9>&-
     startup_phase=android-clipboard
     "$BASE/android-clipboard" start 9>&-
-    [ ! -x "$BASE/android-media" ] || "$BASE/android-media" start 9>&-
     startup_phase=android-calls
     "$BASE/android-calls" start 9>&-
     # The container binds /storage/emulated/0/Plasma when it starts. After an Android

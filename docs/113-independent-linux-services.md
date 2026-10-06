@@ -119,7 +119,7 @@ The following records describe the preceding change and its device evidence.
 | 剪贴板 | 已有 UID 2000 ClipboardDaemon | 保留，不重造 | Wayland / XDG 桌面服务 |
 | 通话 | 已有 root CallDaemon；`InCallService` 仍属 APK | 保留，只迁 SIM 状态与短信 | ModemManager + 通话服务；不能把现有电话链路称为完全脱离 APK |
 | 扬声器 | Termux PulseAudio / OpenSL ES 后端已独立 | 保留 | ALSA / PipeWire |
-| 麦克风、相机 | APK CaptureBridge / CaptureService | 未迁移 | ALSA / PipeWire / libcamera；先核对权限与真实采集 |
+| 麦克风、相机、手机外放、Agent 通话声音 | 独立 root MediaDaemon（CaptureBridge）；APK 只管权限、前台、系统通话登记（docs/117） | 已迁移，实机验收待做 | ALSA / PipeWire / libcamera；先核对权限与真实采集 |
 | 硬件视频 | Linux V4L2 主路径；APK MediaCodec 后备 | 未迁移 | V4L2 / GStreamer / FFmpeg；不能把后备路径称为已独立 |
 | 手机画面、触摸、输入法、方向、投屏显示、OCR | APK / Android 宿主 | 仍走显示端点；KWin 重连由另一个 PR 处理 | DRM/KMS、libinput、桌面输入协议、共享 OCR |
 | CPU 唤醒 / Linux 资源上限 | 已有 root busy 唤醒锁、LXC 限额 | 复用；不扩大为整机永不休眠 | systemd / 内核电源和资源管理 |

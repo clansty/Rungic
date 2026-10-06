@@ -12,6 +12,8 @@ install -Dm755 "$SRC/shared/platform/sms.py" "$DESTDIR/usr/bin/rungic-sms"
 install -Dm644 "$SRC/shared/platform/rungic_platform_transport.py" "$DESTDIR/usr/lib/python3/dist-packages/rungic_platform_transport.py"
 install -Dm644 "$SRC/shared/platform/host_watch.py" "$DESTDIR/usr/lib/python3/dist-packages/rungic_host_watch.py"
 install -Dm755 "$SRC/shared/platform/network-manager.py" "$DESTDIR/usr/libexec/rungic-android-network"
+# Linux's own network (docs/116): the Android side's pasta and relays, and the Services switch.
+install -Dm755 "$SRC/shared/platform/own-network.py" "$DESTDIR/usr/libexec/rungic-own-network"
 install -Dm755 "$SRC/shared/platform/bluez.py" "$DESTDIR/usr/libexec/rungic-android-bluetooth"
 install -Dm755 "$SRC/shared/platform/modem-manager.py" "$DESTDIR/usr/libexec/rungic-android-modem"
 install -Dm755 "$SRC/shared/media/media-bridge.py" "$DESTDIR/usr/bin/rungic-media-bridge"
@@ -26,9 +28,10 @@ for po in "$SRC"/shared/po/*/rungic-shared.po; do
     mkdir -p "$DESTDIR/usr/share/locale/$lang/LC_MESSAGES"
     msgfmt -c --check-format -o "$DESTDIR/usr/share/locale/$lang/LC_MESSAGES/rungic-shared.mo" "$po"
 done
-for unit in rungic-plasma-network rungic-plasma-bluetooth rungic-plasma-modem; do
+for unit in rungic-plasma-network rungic-plasma-bluetooth rungic-plasma-modem rungic-own-network rungic-network-mode; do
     install -Dm644 "$SRC/desktop/$unit.service" "$DESTDIR/usr/lib/systemd/system/$unit.service"
 done
+install -Dm644 "$SRC/desktop/rungic-network-mode.path" "$DESTDIR/usr/lib/systemd/system/rungic-network-mode.path"
 for unit in rungic-plasma-media rungic-plasma-clipboard rungic-plasma-audio-follow; do
     install -Dm644 "$SRC/desktop/$unit.service" "$DESTDIR/usr/lib/systemd/user/$unit.service"
 done

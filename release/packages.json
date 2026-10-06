@@ -261,7 +261,8 @@
     "rungic-plasma-bridges": [
       "rungic-plasma-network.service",
       "rungic-plasma-bluetooth.service",
-      "rungic-plasma-modem.service"
+      "rungic-plasma-modem.service",
+      "rungic-network-mode.path"
     ],
     "rungic-suggestions": [
       "rungic-suggestions-collect.timer"
@@ -296,6 +297,11 @@
     {
       "source": "system/android-device",
       "path": "/data/adb/rungic-plasma/android-device",
+      "mode": "755"
+    },
+    {
+      "source": "system/android-device",
+      "path": "/data/adb/rungic-plasma/android-media",
       "mode": "755"
     },
     {

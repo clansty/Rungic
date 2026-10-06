@@ -71,6 +71,9 @@ def service(monkeypatch, socket_path, script, name):
     monkeypatch.setattr(module, 'SOCKET', socket_path)
     if hasattr(module, 'RESOLV_CONF'):                 # never the test machine's own resolver
         monkeypatch.setattr(module, 'RESOLV_CONF', str(Path(socket_path).with_name('resolv.conf')))
+        monkeypatch.setattr(module, 'LAST_DNS', str(Path(socket_path).with_name('last-dns')))
+        module.real_gateway_servers = module.gateway_servers
+        monkeypatch.setattr(module, 'gateway_servers', lambda run=None: [])
     monkeypatch.setattr(module, 'GLib', MainLoop())
     return module
 

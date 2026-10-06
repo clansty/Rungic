@@ -20,6 +20,8 @@ ANDROID_FILES = (
     ("system/runtime-boot.sh", "service.d/rungic-runtime.sh", 0o700),
     ("system/rungic-plasma", "rungic-plasma/rungic-plasma", 0o755),
     ("system/android-device", "rungic-plasma/android-device", 0o755),
+    # The same supervisor, run as the media backend's (docs/117).
+    ("system/android-device", "rungic-plasma/android-media", 0o755),
     ("system/android-calls", "rungic-plasma/android-calls", 0o755),
     ("system/android-clipboard", "rungic-plasma/android-clipboard", 0o755),
     ("system/android-audio", "rungic-plasma/android-audio", 0o755),

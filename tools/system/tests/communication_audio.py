@@ -29,7 +29,7 @@ SRC = Path('/src')
 BUILD = Path('/tmp/communication')
 CONTRACT = contracts.load('communication-audio')
 REQUESTS, REPLIES = CONTRACT['messages']['requests'], CONTRACT['messages']['replies']
-CAPTURE = Path('/mnt/android-wayland/capture.sock')   # the provider's fixed path (the app's socket)
+CAPTURE = Path('/mnt/android-wayland/capture.sock')   # the provider's path without the media backend's
 PACTL = '''import os, sys
 args = sys.argv[1:]
 with open(os.environ['FAKE_PACTL_LOG'], 'a') as log:

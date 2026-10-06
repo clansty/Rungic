@@ -1,0 +1,10 @@
+[Unit]
+Description=Follow the own-network switch (docs/116)
+
+[Path]
+# Enabling or disabling rungic-own-network.service changes this directory.
+PathChanged=/etc/systemd/system/multi-user.target.wants
+Unit=rungic-network-mode.service
+
+[Install]
+WantedBy=multi-user.target
