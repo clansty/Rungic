@@ -55,6 +55,10 @@ def host_request(timeout=3.5, **request):
     return result
 
 
+def interface_exists(name):
+    return os.path.exists(f'/sys/class/net/{name}')
+
+
 def default_servers(snapshot):
     """The DNS servers of the default network of an Android snapshot (at most three, IPv6
     link-local ones with their interface), [] when Android has no default network."""
@@ -69,6 +73,10 @@ def default_servers(snapshot):
             except ValueError:
                 continue
             if scope and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', scope):
+                continue
+            # With its own network (docs/116) Linux has no Android interface to reach a link-local
+            # server through.
+            if scope and ip.version == 6 and ip.is_link_local and not interface_exists(scope):
                 continue
             entry = f'{ip}%{scope}' if scope and ip.version == 6 and ip.is_link_local else str(ip)
             if entry not in servers:
@@ -114,7 +122,8 @@ def gateway_servers(run=subprocess.run):
     found = []
     for line in out.splitlines():
         match = re.match(r'default via (\S+) dev (\S+)', line)
-        if match:
+        # Not pasta's gateway (Linux's own network, docs/116): it answers no DNS.
+        if match and match.groups() != ('10.0.2.2', 'eth0'):
             found.append((0 if match.group(2).startswith('wlan') else 1, match.group(1)))
     for _rank, gateway in sorted(found):
         try:

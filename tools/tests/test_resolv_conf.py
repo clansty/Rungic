@@ -34,6 +34,7 @@ def module_with(monkeypatch, tmp_path):
     monkeypatch.setattr(module, 'RESOLV_CONF', str(path))
     monkeypatch.setattr(module, 'LAST_DNS', str(tmp_path / 'state' / 'last-dns'))
     monkeypatch.setattr(module, 'gateway_servers', lambda run=None: ['192.168.31.1'])
+    monkeypatch.setattr(module, 'interface_exists', lambda name: name == 'wlan0')
     return module, path
 
 
@@ -104,6 +105,16 @@ def test_the_gateway_is_read_from_the_routes_wifi_first(monkeypatch, tmp_path):
               'default via 192.168.31.1 dev wlan0 table 1017 proto static\n')
     assert module.real_gateway_servers(lambda *a, **k: types.SimpleNamespace(stdout=routes)) == ['192.168.31.1']
     assert module.real_gateway_servers(lambda *a, **k: types.SimpleNamespace(stdout='')) == []
+    own = 'default via 10.0.2.2 dev eth0 proto static\n'               # Linux's own network: pasta's
+    assert module.real_gateway_servers(lambda *a, **k: types.SimpleNamespace(stdout=own)) == []
+
+
+# covers: desktop.network/E9
+def test_with_its_own_network_a_link_local_server_of_android_is_left_out(monkeypatch, tmp_path):
+    module, path = module_with(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, 'interface_exists', lambda name: name == 'eth0')
+    module.sync_resolv_conf(snapshot({**WIFI, 'dns': ['fe80::1%wlan0', '198.18.0.1']}))
+    assert path.read_text().splitlines()[1:] == ['nameserver 198.18.0.1']
 
 
 # covers: desktop.network/E6

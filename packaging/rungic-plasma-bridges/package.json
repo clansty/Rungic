@@ -21,9 +21,12 @@
     "desktop/rungic-plasma-clipboard.service",
     "desktop/rungic-plasma-audio-follow.service",
     "shared/media/communication-audio.cpp",
-    "desktop/rungic-communication-audio.service"
+    "desktop/rungic-communication-audio.service",
+    "desktop/rungic-own-network.service",
+    "desktop/rungic-network-mode.service",
+    "desktop/rungic-network-mode.path"
   ],
-  "depends": "rungic-plasma-config, python3, python3-gi, python3-dbus, gir1.2-adw-1, pulseaudio-utils, pipewire, bluedevil, gstreamer1.0-plugins-bad",
+  "depends": "rungic-plasma-config, python3, python3-gi, python3-dbus, gir1.2-adw-1, pulseaudio-utils, pipewire, bluedevil, gstreamer1.0-plugins-bad, passt, util-linux",
   "build_depends": [
     "libpipewire-0.3-dev",
     "libjson-glib-dev",
@@ -40,7 +43,9 @@
     "system": [
       "rungic-plasma-network.service",
       "rungic-plasma-bluetooth.service",
-      "rungic-plasma-modem.service"
+      "rungic-plasma-modem.service",
+      "rungic-network-mode.service",
+      "rungic-network-mode.path"
     ],
     "user": [
       "rungic-plasma-media.service",

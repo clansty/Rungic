@@ -4,7 +4,7 @@
 
 以产品功能和用户场景为骨架：每条功能是用户能感知的一件事；“体验”是它必须做到的，每条都标明由什么检查（自动测试、实机验收、人工验证或已登记的缺口）。数据在 `quality/`，规则见 [quality/README.md](../quality/README.md)。
 
-共 163 条功能、711 条体验，其中 668 条有检查。
+共 163 条功能、712 条体验，其中 669 条有检查。
 
 ## Agent 能力
 
@@ -2401,19 +2401,21 @@ Agent 不靠点界面就能拿到合并日志、崩溃回溯、追踪、截图�
 - **E3** 在 Linux 里打开或关闭 Wi-Fi，安卓的 Wi-Fi 跟着变，显示状态以安卓随后读数为准。（单元测试）
 - **E4** 安卓网络变化后很快反映到 Linux，而且不靠高频轮询（SSID 与信号正常，空闲时无持续开销）。（单元测试、人工）
 - **E5** 安卓接口异常或超时时状态变为未知，不继续显示过期的“已连接”。不支持的操作明确返回 NotSupported，不伪造成功。（单元测试）
-- **E6** Linux 程序的域名解析跟随安卓当前默认网络（开 VPN 时用 VPN 的 DNS）：/etc/resolv.conf 随网络变化原子更新，断网时不保留已失效的服务器。安卓侧连不上时保持原样。（单元测试）
+- **E6** Linux 程序的域名解析跟随安卓当前默认网络（开 VPN 时用 VPN 的 DNS）：/etc/resolv.conf 随网络变化原子更新。解析器任何时候都不留空：安卓侧连不上、刚开机还没有快照或一时没有默认网络时，沿用最近一次安卓给的 DNS（存在磁盘上，重启后也在）；从来没有过时用 Linux 能看到的默认网关（Wi-Fi 优先），安卓给出真实值后替换。（单元测试）
 - **E7** 用户手工写的 /etc/resolv.conf（没有 Rungic 标记行）或符号链接不被覆盖。（单元测试）
 - **E8** 手机显示 APK 不在时，网络状态与事件仍由独立硬件后端提供；故障明确报错，不重复提交操作。（单元测试）
+- **E9** “独立网络”服务（默认打开）：Linux 有自己的网络命名空间，由 pasta 以 Rungic 应用的安卓 uid 替它联网，安卓和 VPN 应用把 Linux 当成 Rungic 应用（走 VPN、用 VPN 的 DNS、守分应用规则）。局域网 SSH、访问安卓服务的抽象 socket 与本机端口照常可用；强行停止 App 不影响网络。关掉后下次启动 Linux 时回到共享安卓的网络。（单元测试）
 
 注意：
 - 镜像只带一行占位注释的 /etc/resolv.conf，原先没有任何机制写入 DNS，新装设备的 Linux 程序解析不了域名（issue [docs/research/32-network-integration.md](../docs/research/32-network-integration.md)
+- 共用安卓的网络时，Linux 的连接带着 uid 0、1000 进入安卓网络栈，安卓和 VPN 应用按系统身份处理。用户手机开 Clash 全局 VPN 时 root 的 TLS 失败而应用正常（2026-10-06）。独立网络让 Linux 以 Rungic 应用的身份联网；抽象 socket 属于网络命名空间，要中转。 [docs/116-own-network.md](../docs/116-own-network.md)
 - 没有 Linux NetworkManager 守护进程、wpa_supplicant 或 DHCP。安卓独占网卡、路由、DNS 与凭据。在服务页打开 NetworkManager 等服务可能抢走网卡、断开无线调试。 [docs/research/32-network-integration.md](../docs/research/32-network-integration.md) [docs/83-service-policy.md](../docs/83-service-policy.md)
 - 普通安卓 API 会脱敏 SSID/BSSID，靠白名单 root cmd wifi 补齐。固定安卓 16 的输出格式，换 ROM 要重验。 [docs/research/32-network-integration.md](../docs/research/32-network-integration.md)
 - ModemManagerQt 等客户端只在服务已存在时订阅 InterfacesAdded，桥接服务要先发布对象再占用总线名。 [docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)
 - 实际连接新网络未在实机验证：离开当前 Wi-Fi 会断开 adb。设置页启动时曾短暂看到临时连接 Settings/wifi，待查。 [docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)
 - ObjectManager 在 /org/freedesktop，Manager 在 /org/freedesktop/NetworkManager，两个路径不能混淆。 [docs/research/32-network-integration.md](../docs/research/32-network-integration.md)
 
-文档：[docs/research/32-network-integration.md](../docs/research/32-network-integration.md)、[docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)
+文档：[docs/research/32-network-integration.md](../docs/research/32-network-integration.md)、[docs/73-reduce-upstream-changes.md](../docs/73-reduce-upstream-changes.md)、[docs/113-independent-linux-services.md](../docs/113-independent-linux-services.md)、[docs/116-own-network.md](../docs/116-own-network.md)
 
 #### 蓝牙
 

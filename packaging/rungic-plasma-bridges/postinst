@@ -1,0 +1,16 @@
+#!/bin/sh
+# Linux's own network (docs/116): its Services switch is on by default, applied once as
+# rungic-plasma-config applies the others (a later change in Settings -> Services stays), and its
+# state handed to the Android side for the next start.
+if [ "$1" = configure ]; then
+    state=/var/lib/rungic/service-defaults
+    mkdir -p /var/lib/rungic
+    touch "$state"
+    if ! grep -qxF "system rungic-own-network.service" "$state"; then
+        deb-systemd-helper enable rungic-own-network.service >/dev/null 2>&1 || true
+        echo "system rungic-own-network.service" >> "$state"
+    fi
+    if [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]; then
+        /usr/libexec/rungic-own-network mode >/dev/null 2>&1 || true
+    fi
+fi

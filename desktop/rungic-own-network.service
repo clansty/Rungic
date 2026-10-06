@@ -1,0 +1,13 @@
+[Unit]
+Description=Linux's own network, as the Rungic app (docs/116)
+Documentation=file:///usr/share/doc/rungic-plasma-bridges/116-own-network.md
+# The switch of Settings -> Services: enabled, Linux gets its own network the next time it starts
+# (system/rungic-plasma reads rungic-network-mode's file). This only reports whether it has it now.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/rungic-own-network status
+
+[Install]
+WantedBy=multi-user.target
