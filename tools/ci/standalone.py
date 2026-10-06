@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Build, verify and install an independent Rungic payload on a prepared Android base.
+"""Build, verify, install or remove an independent Rungic payload.
 
-Developer ADB entry point, not a firmware flasher. An existing runtime is refused;
-upgrade/account migration and destructive device preparation are separate operations.
-Installation can resume its own incomplete release. A caller supplies the trusted
-manifest digest, exact serial and ADB port. No device discovery or default handset.
+Use a prepared Android base. An existing runtime prevents a new installation.
+Upgrade and account migration are separate operations. Removal requires explicit confirmation.
+Installation can resume its own incomplete release. Supply the trusted manifest digest,
+exact hardware serial and ADB port. This tool has no device discovery or default handset.
 """
 import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import os
+import select
+import uuid
 import hashlib
 import json
 from pathlib import Path
@@ -23,8 +28,9 @@ FILES = {'rootfs.img.gz', 'host-seed.tar.gz', 'rungic.apk', 'termux.apk',
          'termux-prefix.tar.gz', 'rungic-sparse-write', 'firstboot.sh', 'service.sh',
          'boot-dispatch.sh', 'seed.env', 'device-spec.json', 'rootfs-report.json', 'host-seed-report.json',
          'kernel-report.json', 'packages.lock.tsv', 'release.json'}
-REMOTE = '/data/adb/rungic-install'
-APP = 'com.rungic.plasma'
+from install_paths import (PATHS, HOME, PRESERVED, COMPAT, UNINSTALLED, PENDING,
+                           MAINTENANCE_LOCK, FIRSTBOOT_LOCK, RETAINED, APP, APP_DATA, staging_path)
+REMOTE = PATHS['RUNGIC_PAYLOAD']
 
 
 def digest(path):
@@ -39,9 +45,84 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
-def write(path, value):
-    Path(path).write_text(json.dumps(value, indent=2) + '\n')
+def atomic_text(path, content):
+    path = Path(path)
+    temporary = path.with_name(path.name + '.tmp')
+    with temporary.open('w') as output:
+        output.write(content)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(path)
 
+
+
+def write(path, value):
+    atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+
+
+def write_removal_report(path, result):
+    result['path_results'] = []
+    for target in result.get('delete_plan', []):
+        operation = ('deleted' if target in result.get('deleted', []) else
+                     'absent' if target in result.get('already_absent', []) else
+                     'failed_attempt' if target in result.get('attempted', []) else 'not_attempted')
+        after = result.get('after', {})
+        if result.get('readback_error') or not after:
+            readback = 'unknown'
+        elif target in after.get('paths', {}):
+            readback = 'present' if after['paths'][target] else 'absent'
+        elif target.startswith('/data/local/tmp/rungic-') and 'stages' in after:
+            readback = 'present' if target in after['stages'] else 'absent'
+        else:
+            readback = 'unknown'
+        result['path_results'].append({'path': target, 'operation': operation, 'readback': readback})
+    write(path, result)
+    title = '只读预览' if result.get('plan_only') else ('范围内卸载完成' if result.get('complete') else '卸载未完成')
+    lines = ['# Rungic 卸载报告', '', title, '',
+             f"设备：{result.get('serial', '未确认')}；ADB 端口：{result.get('adb_port', '未确认')}。",
+             '默认保留当前 Linux 家目录。只有显式 --purge 才永久删除它；历史保留资料始终保留。', '',
+             '本报告不证明首装、重启后的旧种子拦截或完整候选质量通过。', '']
+    lines += ['当前模式：' + ('--purge，永久删除当前 Linux 家目录，不能恢复。' if result.get('purge') else '保留当前 Linux 家目录。'),
+              '开始时间：' + result.get('started_at', '未进入执行计划') + '。', '']
+    before = result.get('before', {})
+    if before:
+        lines += ['安装前实际版本：`' + before.get('release', '未找到独立发布描述符') + '`。',
+                  'APK 版本：' + '；'.join(before.get('apk_versions', [])),
+                  '底座与内核：' + '；'.join(before.get('base', [])), '']
+    if result.get('error'):
+        lines += ['失败原因：' + result['error'], '']
+    if result.get('readback_error'):
+        lines += ['最终读回失败，不能确认当前现场：' + result['readback_error'], '']
+    if 'preserved_home' in result:
+        lines += ['保留位置：`' + result['preserved_home'] + '`。移动后已核对原家目录 inode。', '']
+    if 'preflight' in result:
+        lines += ['## 只读预检', '', result['preflight_note'], '',
+                  '按当前现场，如果不先解除条件，检查会阻塞在：' + (result['would_stop_at'] or '未发现阻塞项') + '。', '',
+                  '| 检查 | 当前结果 | 原因 |', '| --- | --- | --- |']
+        for entry in result['preflight']:
+            lines.append(f"| {entry['name']} | {entry['state']} | {entry['reason']} |")
+        lines.append('')
+    lines += ['## 删除范围', '', '| 路径 | 操作结果 | 独立读回 |', '| --- | --- | --- |']
+    operations = {'deleted': '删除脚本报告已删除', 'absent': '删除脚本报告原本不存在',
+                  'failed_attempt': '已尝试，未报告删除成功', 'not_attempted': '未尝试删除'}
+    observations = {'absent': '确认不存在', 'present': '仍然存在', 'unknown': '读回未完成，未确认'}
+    for entry in result['path_results']:
+        lines.append(f"| `{entry['path']}` | {operations[entry['operation']]} | {observations[entry['readback']]} |")
+    lines += ['', '停止服务可能改变运行状态；“未尝试删除”不表示运行状态完全未变。', '',
+              '## 明确保留', '', '| 路径 | 原因 |', '| --- | --- |']
+    for target, reason in result.get('expected_retained', {}).items():
+        lines.append(f'| `{target}` | {reason} |')
+    if result.get('outside_scope'):
+        lines += ['', '## 范围外残留', '', '以下项没有删除，也没有验证其内容：', '']
+        lines += ['- `' + entry['path'] + '`' for entry in result['outside_scope']]
+    lines += ['', '## 恢复家目录', '',
+              '新安装不会自动读取保留资料。先完成新账户创建，再停止 Linux。',
+              '确认新旧账户同名，home 路径和数字 UID/GID 一致，确认 Shared 已解除挂载。',
+              '保留新家目录作为回退，再把保留的 home 移回原 state/home 路径；不得直接覆盖正在运行的目录。',
+              '保留原所有者、权限、链接、ACL 和 SELinux 标签；核对内容与访问权限后才启动 Linux。',
+              '恢复操作须单独授权和验收，本工具不会执行恢复。', '',
+              '原始现场、操作输出、失败与未尝试范围见同目录 report.json。', '']
+    atomic_text(Path(path).with_suffix('.md'), '\n'.join(lines))
 
 def valid_id(value):
     if not isinstance(value, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', value):
@@ -182,8 +263,50 @@ class Device:
         self.adb = [args.adb, '-P', str(args.adb_port), '-s', args.serial]
 
     def shell(self, script, root=False, timeout=120):
+        if getattr(self, '_lease', None) is not None and self._lease.poll() is not None:
+            raise ValueError('The device maintenance lock was lost.')
         return subprocess.check_output(self.adb + ['shell'] + (['su', '-c', 'sh'] if root else ['sh']),
-                                       input=('set -eu\n' + script + '\n').encode(), timeout=timeout).decode().strip()
+                                       input=('set -eu\n' + script + '\n').encode(), timeout=timeout, stderr=subprocess.STDOUT).decode().strip()
+
+    @contextmanager
+    def maintenance(self, removal=False):
+        locks = [MAINTENANCE_LOCK]
+        if removal:
+            locks += [FIRSTBOOT_LOCK, '/data/adb/rungic-install.lock',
+                      '/data/adb/rungic-cast-install.lock']
+        worker = "printf 'RUNGIC_LOCKED\\n'; read -r release"
+        command = '/system/bin/sh -c ' + shlex.quote(worker)
+        for lock in reversed(locks):
+            command = '/data/adb/magisk/busybox flock -n ' + shlex.quote(lock) + ' ' + command
+        process = subprocess.Popen(self.adb + ['shell', 'su', '-c', 'sh'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT)
+        try:
+            process.stdin.write(('set -eu\n' + command + '\n').encode())
+            process.stdin.flush()
+            if not select.select([process.stdout], [], [], 15)[0]:
+                raise ValueError('The device maintenance lock did not respond.')
+            line = process.stdout.readline().decode(errors='replace').strip()
+            if line != 'RUNGIC_LOCKED':
+                raise ValueError('Installation, first boot or removal is active: ' + line)
+            self._lease = process
+            yield
+            if process.poll() is not None:
+                raise ValueError('The device maintenance lock was lost.')
+        finally:
+            self._lease = None
+            if process.stdin:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.wait(timeout=10)
+            if process.stdout:
+                process.stdout.close()
 
     def push(self, local, remote):
         subprocess.run(self.adb + ['push', str(local), remote], check=True, timeout=1800)
@@ -208,21 +331,27 @@ def preflight(device, m):
 def install(args):
     folder = args.payload.resolve()
     m = verify(folder, args.manifest_sha256)
-    d = Device(args)
-    evidence = preflight(d, m)
+    device = Device(args)
+    evidence = preflight(device, m)
+    with device.maintenance():
+        return _install(args, device, folder, m, evidence)
+
+
+def _install(args, d, folder, m, evidence):
     rid = m['release']
     # Refuse replacement, even when it would fit: a full update needs data migration.
-    d.shell(f'''if [ -f {REMOTE}/active.env ]; then
+    d.shell(f'''test ! -e {PENDING} || {{ echo '上次卸载没有完成，请先重新运行卸载。' >&2; exit 1; }}
+    if [ -f {REMOTE}/active.env ]; then
         grep -qxF {shlex.quote('RELEASE_ID=' + rid)} {REMOTE}/active.env
         test "$(cat {REMOTE}/manifest.sha256)" = {shlex.quote(args.manifest_sha256)}
     else
-        test ! -e /data/adb/rungic-lxc
-        test ! -e /data/adb/rungic-plasma
+        test ! -e {PATHS['RUNGIC_LXC']}
+        test ! -e {PATHS['RUNGIC_CONTROLLER']}
     fi
     test -x /data/adb/magisk/busybox
     df -k /data | tail -n 1 | awk -v need={m['rootfs_bytes'] // 1024 + 4 * 1024**2} '{{if ($4 < need) exit 1}}'
     ''', root=True)
-    stage = '/data/local/tmp/rungic-' + rid
+    stage = staging_path(rid)
     d.shell(f'mkdir -p {stage}')
     for name in sorted(FILES | {'manifest.json'}):
         d.push(folder / name, stage + '/' + name)
@@ -246,14 +375,14 @@ def install(args):
         # Old init_boot rewrites service.d from product on every boot. Magisk's
         # documented product overlay redirects that immutable caller as well.
         if [ -f /product/etc/rungic/firstboot.sh ]; then
-            legacy=/data/adb/rungic-install-legacy
+            legacy={PATHS['RUNGIC_LEGACY']}
             mkdir -p "$legacy"
             chmod 700 "$legacy"
             if [ ! -f "$legacy/firstboot.sh" ]; then
                 cp /product/etc/rungic/firstboot.sh "$legacy/firstboot.sh"
                 chmod 700 "$legacy/firstboot.sh"
             fi
-            mod=/data/adb/modules/rungic-install-compat
+            mod={COMPAT}
             mkdir -p "$mod/system/product/etc/rungic"
             printf '%s\\n' 'id=rungic-install-compat' 'name=Rungic independent installer compatibility' 'version=1' 'versionCode=1' 'author=Rungic' 'description=Route legacy product seeding to the selected independent release.' > "$mod/module.prop"
             cp {REMOTE}/payload/boot-dispatch.sh "$mod/system/product/etc/rungic/firstboot.sh"
@@ -266,6 +395,7 @@ def install(args):
         echo {shlex.quote(args.manifest_sha256)} > {REMOTE}/manifest.sha256
         echo RELEASE_ID={rid} > {REMOTE}/active.env.tmp
         mv {REMOTE}/active.env.tmp {REMOTE}/active.env
+        rm -f {UNINSTALLED}
         files=/data/user/0/{APP}/files
         mkdir -p "$files"
         owner=$(stat -c %u /data/user/0/{APP})
@@ -282,15 +412,489 @@ def install(args):
         chcon "$label" "$files" "$files/rungic-install-source.properties.tmp"
         mv "$files/rungic-install-source.properties.tmp" "$files/rungic-install-source.properties"
         mkdir -p /data/adb/service.d
-        cp {REMOTE}/payload/service.sh /data/adb/service.d/00-rungic-firstboot.sh
-        chmod 700 /data/adb/service.d/00-rungic-firstboot.sh
+        cp {REMOTE}/payload/service.sh {PATHS['RUNGIC_BOOT_SERVICE']}
+        chmod 700 {PATHS['RUNGIC_BOOT_SERVICE']}
         sync
         ''', root=True)
     print('Payload verified; starting independent installation.', flush=True)
     # Device process survives a host disconnect; the service entry retries after reboot.
-    d.shell(f'''/data/adb/magisk/busybox setsid /system/bin/sh {REMOTE}/payload/firstboot.sh {REMOTE}/payload </dev/null >/data/adb/rungic-install-launch.log 2>&1 &''', root=True)
+    d.shell(f'''/data/adb/magisk/busybox setsid /system/bin/sh {REMOTE}/payload/firstboot.sh {REMOTE}/payload </dev/null >{PATHS['RUNGIC_LAUNCH_LOG']} 2>&1 &''', root=True)
     print(json.dumps({'state': 'installing', 'release': rid, 'base': evidence,
                       'status_command': 'standalone.py status with the same --serial and --adb-port'}))
+
+
+def uninstall_state(device):
+    """Read exact owned paths and report other Rungic names without deleting them."""
+    owned = list(PATHS.values()) + list(RETAINED) + [PENDING, HOME, f'/data/user/0/{APP}']
+    script = '\n'.join(
+        f'if [ -e {shlex.quote(path)} ] || [ -L {shlex.quote(path)} ]; then printf "%s\\t1\\n" {shlex.quote(path)}; else printf "%s\\t0\\n" {shlex.quote(path)}; fi'
+        for path in owned)
+    output = device.shell(script, root=True)
+    paths = {}
+    for line in output.splitlines():
+        path, present = line.split('\t', 1)
+        paths[path] = present == '1'
+    pending = device.shell(f'test ! -L {PENDING}; if [ -e {PENDING} ]; then test -f {PENDING}; cat {PENDING}; fi', root=True)
+    stages = device.shell("find /data/local/tmp -maxdepth 1 -type d -name 'rungic-*' -print", root=True).splitlines()
+    return {'paths': paths, 'pending': pending, 'stages': stages,
+            'other_paths': device.shell("find /data/adb -maxdepth 1 -name '*rungic*' -print", root=True).splitlines(),
+            'user_packages': '\n'.join(line for line in device.shell(f'pm list packages --user 0 {APP}').splitlines() if line == f'package:{APP}'),
+            'package_paths': device.shell(f'pm path {APP} || true'),
+            'termux_path': device.shell('pm path com.termux || true'),
+            'base': device.shell('getprop ro.build.fingerprint; uname -r; getenforce', root=True).splitlines(),
+            'apk_versions': device.shell(f'dumpsys package {APP} | grep -E "versionCode=|versionName=" || true').splitlines(),
+            'release': device.shell(f'if [ -f {REMOTE}/active.env ]; then cat {REMOTE}/active.env; fi', root=True)}
+
+
+def uninstall_root_script(purge=False, operation_id=None, stages=(), preview=False):
+    operation_id = valid_id(operation_id or uuid.uuid4().hex)
+    for stage in stages:
+        if not stage.startswith('/data/local/tmp/rungic-'):
+            raise ValueError('Invalid staging path.')
+        valid_id(stage.removeprefix('/data/local/tmp/rungic-'))
+    values = {'home': HOME, 'preserved': PRESERVED, 'compat': COMPAT,
+              'pending': PENDING, 'uninstalled': UNINSTALLED,
+              'controller': PATHS['RUNGIC_CONTROLLER'], 'lxc': PATHS['RUNGIC_LXC'],
+              'operation': operation_id, 'purge': '1' if purge else '0',
+              'stage_release': stages[0].removeprefix('/data/local/tmp/rungic-') if stages else '-'}
+    header = '\n'.join(key + '=' + shlex.quote(value) for key, value in values.items())
+    paths = ' '.join(shlex.quote(path) for path in (*PATHS.values(), *stages))
+    # These checks never stop workers or write device files. Execution reuses them after stop.
+    checks = r"""
+set -eu
+set -o pipefail
+BB=/data/adb/magisk/busybox
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+check_paths() {
+    for parent in /data/data/com.termux /data/data/com.termux/files /data/data/com.termux/files/usr /data/data/com.termux/files/usr/tmp /data/adb /data/adb/service.d /data/adb/modules /data/local/tmp "$preserved" "$compat" "$lxc" "$controller" "$pending"; do
+        [ ! -L "$parent" ] || { echo "Protected path is a symlink: $parent" >&2; return 1; }
+    done
+}
+check_processes() {
+    for proc in /proc/[0-9]*; do
+        [ -d "$proc" ] || continue
+        if [ -r "$proc/cmdline" ]; then :
+        else
+            [ -d "$proc" ] || continue
+            echo "Cannot read a process command: $proc" >&2; return 2
+        fi
+        if command=$(tr '\000' ' ' 2>/dev/null < "$proc/cmdline"); then :
+        else
+            [ -d "$proc" ] || continue
+            echo "Cannot read a process command: $proc" >&2; return 2
+        fi
+        case "$command" in
+            *'/data/adb/rungic-plasma/'*|*'/data/adb/rungic-lxc/'*|*'/data/adb/rungic-wfd/'*|*'com.rungic.cast.Main watch '*|*'com.rungic.plasma.MediaDaemon '*|*'com.rungic.plasma.DeviceDaemon '*|*'com.rungic.clipboard.ClipboardDaemon '*|*'com.rungic.telephony.CallDaemon '*|*'/data/data/com.termux/files/usr/tmp/rungic-plasma-audio/'*)
+                echo "相关进程仍在运行：${proc##*/}。执行会先停止服务，再复检。" >&2; return 1;;
+        esac
+    done
+}
+check_mounts() {
+    for table in /proc/mounts /proc/self/mountinfo /proc/[0-9]*/mountinfo; do
+        code=0
+        grep -Eq '/adb/(rungic-|\.rungic-)' "$table" 2>/dev/null || code=$?
+        case "$code" in
+            0) echo '家目录或运行目录下面还有挂载点。没有删除任何内容。请先解除挂载并重试。--purge 会永久删除家目录，不能恢复；它也不能绕过挂载检查。' >&2; return 1;;
+            1) :;;
+            *) case "$table" in
+                   /proc/mounts|/proc/self/mountinfo) :;;
+                   *) [ -d "${table%/mountinfo}" ] || continue;;
+               esac
+               echo "Cannot inspect a mount table: $table" >&2; return 2;;
+        esac
+    done
+}
+check_images() {
+    for file in /sys/block/dm-*/dm/name; do
+        [ -f "$file" ] || continue
+        name=$(cat "$file") || { echo "Cannot read a mapping: $file" >&2; return 2; }
+        case "$name" in rungic-root|rungic-before) echo "Image mapping remains: $name" >&2; return 1;; esac
+    done
+    for file in /sys/block/loop*/loop/backing_file; do
+        [ -f "$file" ] || continue
+        backing=$(cat "$file") || { echo "Cannot read an image loop: $file" >&2; return 2; }
+        case "$backing" in *'/data/adb/rungic-'*|*'/data/adb/.rungic-'*) echo "Image loop remains: $backing" >&2; return 1;; esac
+    done
+}
+mount_id() {
+    awk -v path="$1" '
+        $5 == "/" || path == $5 || index(path, $5 "/") == 1 {
+            size=length($5)
+            if (size > best) {best=size; id=$1; count=1}
+            else if (size == best) {count++}
+        }
+        END {if (count != 1 || id !~ /^[0-9]+$/ || id + 0 < 1) exit 1; print id}
+    ' /proc/self/mountinfo
+}
+check_home() {
+    for part in "$lxc/runtime" "$lxc/runtime/var" "$lxc/runtime/var/lib" "$lxc/runtime/var/lib/lxc" "$lxc/runtime/var/lib/lxc/plasma" "$lxc/runtime/var/lib/lxc/plasma/state" "$home"; do
+        [ ! -L "$part" ] || { echo "A home parent is a symlink: $part" >&2; return 1; }
+    done
+    if present "$home"; then
+        [ -d "$home" ] || { echo 'The home path is not a directory.' >&2; return 1; }
+        source_mount=$(mount_id "$home") || { echo 'Cannot resolve the home mount.' >&2; return 2; }
+        if [ "$purge" = 0 ]; then
+            parent=$preserved
+            [ -d "$parent" ] || parent=/data/adb
+            target_mount=$(mount_id "$parent") || { echo 'Cannot resolve the preservation mount.' >&2; return 2; }
+            [ "$source_mount" = "$target_mount" ] || { echo '家目录不能原地保留：目标位置跨了挂载。没有删除任何内容。请先手动备份家目录；如果不需要保留家目录，可显式加 --purge。这会永久删除家目录，不能恢复。' >&2; return 1; }
+            echo "home_mount=$source_mount preservation_mount=$target_mount"
+        else
+            echo "home_mount=$source_mount purge=1"
+        fi
+    else
+        echo 'No current home exists.'
+    fi
+}
+"""
+    if preview:
+        return header + '\n' + checks + r"""
+for name in paths processes mounts images home; do
+    if detail=$("check_$name" 2>&1); then state=PASS
+    else
+        code=$?
+        if [ "$code" = 1 ]; then state=BLOCKED; else state=UNKNOWN; fi
+    fi
+    detail=$(printf '%s' "$detail" | tr '\n\t' '  ')
+    printf 'check\t%s\t%s\t%s\n' "$name" "$state" "$detail"
+done
+"""
+    script = r"""
+umask 077
+fail() { echo "Rungic removal stopped: $*" >&2; exit 1; }
+check_paths || fail 'Protected paths failed the check.'
+resuming=0
+changed=0
+home_before=0
+present "$home" && home_before=1
+target=$preserved/home-$operation/home
+if present "$pending"; then
+    resuming=1
+    [ -f "$pending" ] || fail 'The removal record is not a file.'
+    actual=$(cat "$pending") || fail 'Cannot read the removal record.'
+    [ "$actual" = "$operation:$purge:$stage_release" ] || fail 'Removal record differs from this request.'
+fi
+finish_root() {
+    code=$?
+    trap - EXIT
+    home_after=0
+    present "$home" && home_after=1
+    if [ "$code" != 0 ] && [ "$changed" = 0 ] && [ "$resuming" = 0 ] && [ "$home_before" = "$home_after" ] && ! present "$target"; then
+        rm -f "$pending"
+        sync
+        printf 'phase\tpreflight-marker-cleared\n'
+    fi
+    exit "$code"
+}
+trap finish_root EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+[ ! -L "$pending.tmp" ] || fail 'The pending record is a symlink.'
+printf '%s\n' "$operation:$purge:$stage_release" > "$pending.tmp"
+sync
+mv "$pending.tmp" "$pending"
+sync
+if [ -x "$controller/rungic-plasma" ]; then
+    "$controller/rungic-plasma" stop
+    runtime_state=$("$controller/rungic-plasma" runtime-status) || fail 'Cannot read the container state.'
+    [ "$runtime_state" = STOPPED ] || fail 'The container did not stop.'
+fi
+# Only the casting watcher needs a signal. Other workers stop through the controller.
+for proc in /proc/[0-9]*; do
+    [ -d "$proc" ] || continue
+    if [ -r "$proc/cmdline" ]; then :
+    else
+        [ -d "$proc" ] || continue
+        fail "Cannot read a process command: $proc"
+    fi
+    if command=$(tr '\000' ' ' 2>/dev/null < "$proc/cmdline"); then :
+    else
+        [ -d "$proc" ] || continue
+        fail "Cannot read a process command: $proc"
+    fi
+    case "$command" in
+        *'/data/adb/rungic-wfd/rungic-cast-watch '*|*'com.rungic.cast.Main watch '*)
+            kill -TERM "${proc##*/}" || { [ ! -d "$proc" ] || fail 'Cannot stop the casting watcher.'; };;
+    esac
+done
+for attempt in 1 2 3 4 5; do
+    if check_processes; then break; fi
+    [ "$attempt" != 5 ] || fail 'Rungic processes remain or cannot be inspected.'
+    sleep 1
+done
+check_mounts || fail 'Mounts failed the check.'
+check_images || fail 'Image resources failed the check.'
+check_home || fail 'The home failed the check.'
+mkdir -p "$preserved"
+chmod 700 "$preserved"
+journal=$preserved/uninstall-$operation.log
+[ ! -L "$journal" ] || fail 'The progress journal is a symlink.'
+progress() { printf '%s\t%s\n' "$1" "$2" | tee -a "$journal"; sync; }
+progress phase stopped
+if [ "$purge" = 0 ]; then
+    record=$preserved/home-$operation
+    intent=$record/intent
+    if present "$record"; then
+        [ ! -L "$record" ] && [ -f "$intent" ] && [ ! -L "$intent" ] || fail 'Invalid preservation record.'
+        length=$(wc -l < "$intent") || fail 'Cannot read the preservation record.'
+        [ "$length" -eq 4 ] || fail 'Invalid preservation record length.'
+        source=$(sed -n '1p' "$intent") || fail 'Cannot read the preservation record.'
+        destination=$(sed -n '2p' "$intent") || fail 'Cannot read the preservation record.'
+        inode=$(sed -n '3p' "$intent") || fail 'Cannot read the preservation record.'
+        state=$(sed -n '4p' "$intent") || fail 'Cannot read the preservation record.'
+        [ "$source" = "$home" ] && [ "$destination" = "$target" ] || fail 'Invalid preservation paths.'
+        printf '%s\n' "$inode" | grep -Eq '^[0-9]+:[0-9]+$' || fail 'Invalid preservation inode.'
+        case "$state" in intent|moved) :;; *) fail 'Invalid preservation phase.';; esac
+        if present "$home"; then
+            [ "$state" = intent ] && ! present "$target" || fail 'The preservation target collides with source data.'
+            actual_inode=$(stat -c '%d:%i' "$home") || fail 'Cannot read the home inode.'
+            [ "$actual_inode" = "$inode" ] || fail 'The home inode changed.'
+        else
+            [ -d "$target" ] && [ ! -L "$target" ] || fail 'The preserved home is missing.'
+        fi
+    elif [ -d "$home" ]; then
+        inode=$(stat -c '%d:%i' "$home") || fail 'Cannot read the home inode.'
+        mkdir "$record"
+        printf '%s\n' "$home" "$target" "$inode" intent > "$intent"
+        sync
+    fi
+    if [ -f "$intent" ]; then
+        if present "$home"; then
+            source_mount=$(mount_id "$home") || fail 'Cannot resolve the home mount.'
+            target_mount=$(mount_id "$record") || fail 'Cannot resolve the preservation mount.'
+            [ "$source_mount" = "$target_mount" ] || fail 'The preservation mount differs.'
+            ! present "$target" || fail 'The preservation target already exists.'
+            progress phase changing
+            mv -T -- "$home" "$target" || fail 'Home rename failed.'
+            changed=1
+        fi
+        actual_inode=$(stat -c '%d:%i' "$target") || fail 'Cannot read the preserved home inode.'
+        [ "$actual_inode" = "$inode" ] || fail 'Rename did not preserve the home inode.'
+        sync
+        [ ! -L "$intent.tmp" ] || fail 'The intent temporary file is a symlink.'
+        printf '%s\n' "$home" "$target" "$inode" moved > "$intent.tmp"
+        sync
+        mv "$intent.tmp" "$intent"
+        sync
+        progress preserved "$target"
+        progress moved "$home"
+    fi
+fi
+if [ -f /product/etc/rungic/firstboot.sh ]; then
+    for part in "$compat/system" "$compat/system/product" "$compat/system/product/etc" "$compat/system/product/etc/rungic"; do
+        [ ! -L "$part" ] || fail 'The compatibility module contains a symlink.'
+    done
+    [ ! -L "$compat/module.prop" ] || fail 'The module descriptor is a symlink.'
+    [ ! -L "$compat/system/product/etc/rungic/firstboot.sh" ] || fail 'The seed guard is a symlink.'
+    changed=1
+    progress phase changing
+    mkdir -p "$compat/system/product/etc/rungic"
+    printf '%s\n' 'id=rungic-install-compat' 'name=Rungic removed' 'version=1' 'versionCode=1' 'author=Rungic' 'description=Prevent the old product seed from installing Rungic.' > "$compat/module.prop"
+    printf '#!/system/bin/sh\nexit 0\n' > "$compat/system/product/etc/rungic/firstboot.sh"
+    chmod 755 "$compat" "$compat/system" "$compat/system/product" "$compat/system/product/etc" "$compat/system/product/etc/rungic" "$compat/system/product/etc/rungic/firstboot.sh"
+    chmod 644 "$compat/module.prop"
+    chcon -R u:object_r:system_file:s0 "$compat/system"
+    test ! -e "$compat/disable"
+    test ! -e "$compat/remove"
+fi
+[ ! -L "$uninstalled" ] || fail 'The seed marker is a symlink.'
+changed=1
+progress phase changing
+printf '%s\n' "$operation" > "$uninstalled"
+sync
+progress phase seed-blocked
+"""
+    script += '\nfor path in ' + paths + r"""; do
+    if present "$path"; then
+        progress removing "$path"
+        rm -rf -- "$path"
+        ! present "$path" || fail "Removal left a path: $path"
+        progress deleted "$path"
+    else
+        progress absent "$path"
+    fi
+done
+progress phase runtime-removed
+"""
+    return header + '\n' + checks + script
+
+
+def uninstall(args):
+    if args.report:
+        args.report.mkdir(parents=True, exist_ok=False)
+        write_removal_report(args.report / 'report.json', {'schema': 1, 'kind': 'rungic-uninstall',
+              'complete': False, 'phase': 'identity', 'serial': args.serial})
+    try:
+        return _uninstall(args)
+    except BaseException as error:
+        if args.report:
+            report = read(args.report / 'report.json')
+            report['complete'] = False
+            report['error'] = str(error)
+            write_removal_report(args.report / 'report.json', report)
+        raise
+
+
+def _uninstall(args):
+    """Preview by default. Remove only explicitly selected Rungic installation data."""
+    if not args.serial or not 1 <= args.adb_port <= 65535:
+        raise ValueError('Supply an explicit hardware serial and a valid ADB port.')
+    if args.yes_delete and not args.report:
+        raise ValueError('--report is required with --yes-delete.')
+    device = Device(args)
+    identity = device.shell('getprop ro.serialno')
+    if identity != args.serial:
+        raise ValueError('Device serial differs from the requested hardware serial.')
+    users = device.shell('pm list users')
+    if re.findall(r'UserInfo\{(\d+):', users) != ['0']:
+        raise ValueError('Removal supports Android user 0 only.')
+    if device.shell('id -u', root=True) != '0':
+        raise ValueError('Root access is not available.')
+    before = uninstall_state(device)
+    # Report unselected stage directories. Never remove them with a glob.
+    release = before.get('release', '')
+    stage = ()
+    if release:
+        if not re.fullmatch(r'RELEASE_ID=([a-zA-Z0-9][a-zA-Z0-9_.-]{0,63})', release):
+            raise ValueError('The installed release descriptor is invalid.')
+        stage = (staging_path(valid_id(release.split('=', 1)[1])),)
+    operation_id = uuid.uuid4().hex
+    if before.get('pending'):
+        parts = before['pending'].split(':')
+        if len(parts) != 3 or parts[1] != str(int(args.purge)):
+            raise ValueError('Resume the previous removal with the same --purge choice.')
+        operation_id = valid_id(parts[0])
+        stage = () if parts[2] == '-' else (staging_path(valid_id(parts[2])),)
+    targets = list(PATHS.values()) + list(stage)
+    result = {'schema': 1, 'kind': 'rungic-uninstall', 'serial': identity,
+              'adb_port': args.adb_port, 'operation_id': operation_id, 'purge': args.purge,
+              'started_at': datetime.now(timezone.utc).isoformat(),
+              'plan_only': not args.yes_delete, 'complete': False, 'before': before,
+              'delete_plan': targets, 'expected_retained': dict(RETAINED),
+              'deleted': [], 'attempted': [], 'moved': [], 'already_absent': [], 'failed': [], 'not_touched': targets.copy(), 'steps': [],
+              'limitations': ['The read-only product APK and Android base remain.',
+                              'After reboot, verify the legacy seed guard.',
+                              'Installation does not restore historical preserved homes.'],
+              'preserved_home_status': 'Not observed yet.',
+              'restore': 'Stop Linux. Match the old and new account name, home path and numeric UID/GID. Keep the new home as a rollback copy. Move the preserved home to the original state/home path. Verify data, permissions and labels before starting Linux. Authorize and verify restoration separately.'}
+    if args.purge:
+        result['warning'] = '--purge 永久删除当前 Linux 家目录，不能恢复。历史保留副本不在删除范围内。'
+    if not args.yes_delete:
+        if args.report:
+            write_removal_report(args.report / 'report.json', result)
+        raw = device.shell(uninstall_root_script(args.purge, operation_id, stage, preview=True), root=True)
+        checks = []
+        for line in raw.splitlines():
+            fields = line.split('\t', 3)
+            if len(fields) != 4 or fields[0] != 'check' or fields[2] not in ('PASS', 'BLOCKED', 'UNKNOWN'):
+                raise ValueError('The removal preview response is invalid.')
+            checks.append({'name': fields[1], 'state': fields[2], 'reason': fields[3]})
+        if [entry['name'] for entry in checks] != ['paths', 'processes', 'mounts', 'images', 'home']:
+            raise ValueError('The removal preview response is incomplete.')
+        result['preflight'] = checks
+        result['would_stop_at'] = next((entry['name'] for entry in checks if entry['state'] != 'PASS'), None)
+        result['preflight_allowed'] = result['would_stop_at'] is None
+        result['preflight_note'] = '当前只读检查结果。执行会先停止服务并重新检查；预览不能证明停止会成功，也不申请协调锁。'
+        if args.report:
+            (args.report / 'uninstall-root.sh').write_text(uninstall_root_script(args.purge, operation_id, stage, preview=True))
+            write_removal_report(args.report / 'report.json', result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
+    report_file = args.report / 'report.json'
+    script = uninstall_root_script(args.purge, operation_id, stage)
+    (args.report / 'uninstall-root.sh').write_text(script)
+    write_removal_report(report_file, result)
+
+    def step(name, operation):
+        result['phase'] = name
+        write_removal_report(report_file, result)
+        try:
+            output = operation()
+        except subprocess.SubprocessError as error:
+            raw = getattr(error, 'output', '') or ''
+            if isinstance(raw, bytes):
+                raw = raw.decode(errors='replace')
+            result['steps'].append({'name': name, 'output': raw, 'error': str(error)})
+            raise
+        result['steps'].append({'name': name, 'output': output})
+        write_removal_report(report_file, result)
+        return output
+
+    try:
+        with device.maintenance(removal=True):
+            if before.get('user_packages'):
+                step('stop-app', lambda: device.shell(f'am force-stop --user 0 {APP}'))
+            step('remove-runtime', lambda: device.shell(script, root=True, timeout=1800))
+            if before.get('user_packages'):
+                def package(script):
+                    output = device.shell(script, timeout=180)
+                    if output.strip() != 'Success':
+                        raise ValueError('Package removal did not return Success: ' + output)
+                    return output
+                step('clear-app-data', lambda: package(f'pm clear --user 0 {APP}'))
+                info = device.shell(f'dumpsys package {APP}')
+                if 'UPDATED_SYSTEM_APP' in info:
+                    step('remove-apk-update', lambda: package(f'pm uninstall-system-updates {APP}'))
+                step('remove-user-app', lambda: package(f'pm uninstall --user 0 {APP}'))
+            after = uninstall_state(device)
+            result['after'] = after
+            for path in targets:
+                if after['paths'].get(path, path in after.get('stages', [])):
+                    result['failed'].append({'path': path, 'reason': 'The path remains.'})
+            if after.get('user_packages') or after['paths'].get(f'/data/user/0/{APP}'):
+                result['failed'].append({'path': APP, 'reason': 'The user package remains.'})
+            if before['termux_path'] != after['termux_path']:
+                result['failed'].append({'path': 'com.termux', 'reason': 'The package path changed.'})
+            if result['failed']:
+                raise ValueError('Removal is incomplete. Read the report.')
+            if before.get('user_packages'):
+                result['deleted'].append(APP_DATA)
+            step('finish', lambda: device.shell(f'rm -f {PENDING}; sync', root=True))
+            marker = step('finish-readback', lambda: device.shell(
+                f'if [ -e {PENDING} ] || [ -L {PENDING} ]; then echo PRESENT; else echo ABSENT; fi', root=True))
+            if marker.strip() != 'ABSENT':
+                raise ValueError('Removal marker remains or its readback is unknown.')
+            result['complete'] = True
+            result['phase'] = 'complete'
+    except BaseException as error:
+        result['complete'] = False
+        result['error'] = str(error)
+        result['failed'].append({'phase': result.get('phase', 'lock'), 'reason': str(error)})
+        try:
+            result['after'] = uninstall_state(device)
+        except Exception as readback_error:
+            result.pop('after', None)
+            result['readback_error'] = str(readback_error)
+        raise
+    finally:
+        for entry in result['steps']:
+            for line in entry.get('output', '').splitlines():
+                kind, _, value = line.partition('\t')
+                if kind == 'removing' and value not in result['attempted']:
+                    result['attempted'].append(value)
+                if kind == 'deleted' and value not in result['deleted']:
+                    result['deleted'].append(value)
+                if kind == 'moved' and value not in result['moved']:
+                    result['moved'].append(value)
+                if kind == 'absent' and value not in result['already_absent']:
+                    result['already_absent'].append(value)
+                if kind == 'preserved':
+                    result['preserved_home'] = value
+                    result['preserved_home_status'] = 'Verified rename, with the original home inode.'
+                    result['expected_retained'][value] = 'Original home inode verified after rename.'
+        if result['complete']:
+            result['expected_retained'].pop(PENDING, None)
+        if result['complete'] and 'preserved_home' not in result:
+            result['preserved_home_status'] = 'Removed by explicit --purge request.' if args.purge else 'No current home exists. This operation did not verify historical homes.'
+        observed = result.get('after', before)
+        result['outside_scope'] = [{'path': path, 'reason': 'Outside the selected deletion inventory. Retained without verification.'}
+                                   for path in observed.get('other_paths', []) + observed.get('stages', [])
+                                   if path not in targets and path not in RETAINED and path != PENDING]
+        result['not_touched'] = [path for path in targets if path not in result['attempted'] and path not in result['already_absent']]
+        write_removal_report(report_file, result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
 
 
 def main():
@@ -302,11 +906,15 @@ def main():
     b.add_argument('--release-id', required=True)
     b.add_argument('--build-plan', type=Path, required=True, help='expected component recipes, cache directories and primary artifact bindings')
     v = sub.add_parser('verify'); v.add_argument('payload', type=Path)
-    for action in ('install', 'status'):
+    for action in ('install', 'status', 'uninstall'):
         d = sub.add_parser(action)
         d.add_argument('--adb', default='adb')
         d.add_argument('--adb-port', type=int, required=True)
         d.add_argument('--serial', required=True)
+        if action == 'uninstall':
+            d.add_argument('--yes-delete', action='store_true', help='Authorize removal. Keep the Linux home unless you select --purge.')
+            d.add_argument('--purge', action='store_true', help='Permanently remove the current Linux home. Keep historical copies.')
+            d.add_argument('--report', type=Path, help='new host directory for the script and report')
         if action == 'install':
             d.add_argument('payload', type=Path)
             d.add_argument('--manifest-sha256', required=True)
@@ -315,6 +923,7 @@ def main():
     elif args.command == 'verify':
         m = verify(args.payload); print(json.dumps({'verified': True, 'release': m['release'], 'manifest_sha256': digest(args.payload / 'manifest.json')}))
     elif args.command == 'install': install(args)
+    elif args.command == 'uninstall': uninstall(args)
     else:
         print(Device(args).shell(f'cat /data/user/0/{APP}/files/rungic-install.properties; tail -n 12 /data/adb/rungic-firstboot.log', root=True))
 

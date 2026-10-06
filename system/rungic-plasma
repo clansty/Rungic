@@ -9,6 +9,10 @@ HOST_STATE=$LXC/state/host
 IMAGES=/data/adb/rungic-lxc/images
 [ "$(id -u)" = 0 ] || { echo 'Magisk root required' >&2; exit 1; }
 action=${1:-status}
+case "$action" in
+    start|boot-start|restart-session|account-prepare|account-setup)
+        [ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; };;
+esac
 [ "$#" = 0 ] || shift
 # A product seed publishes the controller before the rootfs and shared paths.
 # Account setup must not enter that partially installed environment.
@@ -247,6 +251,7 @@ case "$action" in
   account-prepare)
     exec 9>"$BASE/control.lock"
     flock 9 9>&9
+    [ "$action" = stop ] || [ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; }
     if ! running; then start_container; fi
     ready=0
     for attempt in $(seq 1 90); do
@@ -274,6 +279,7 @@ case "$action" in
   account-setup)
     exec 9>"$BASE/control.lock"
     flock 9 9>&9
+    [ "$action" = stop ] || [ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; }
     if ! running; then start_container; fi
     attach /usr/libexec/rungic-plasma-account-setup 9>&-
     ;;
@@ -309,6 +315,7 @@ case "$action" in
     # No UI launch, no restart/reset of an existing desktop or its failed units.
     exec 9>"$BASE/control.lock"
     flock 9 9>&9
+    [ "$action" = stop ] || [ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; }
     [ -f "$BASE/runtime.enabled" ] || exit 0
     [ ! -f "$BASE/runtime.disabled" ] || exit 0
     state=$("$ENTER" /usr/bin/lxc-info -n plasma -sH) || exit 1
@@ -348,6 +355,7 @@ case "$action" in
     exec 9>"$BASE/control.lock"
     # Surface recreation and explicit restarts can overlap; serialize them.
     flock 9 9>&9
+    [ "$action" = stop ] || [ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; }
     if [ "$action" = stop ]; then
       [ ! -x "$BASE/rungic-runtime" ] || "$BASE/rungic-runtime" stop 9>&-
       "$BASE/android-media" stop 9>&-
@@ -460,6 +468,7 @@ case "$action" in
     # for all but status.
     exec 9>"$BASE/control.lock"
     flock 9 9>&9
+    [ "$action" = stop ] || [ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; }
     exec "$BASE/rootfs-image" "$@" 9>&-
     ;;
   hide-keyboard|home)

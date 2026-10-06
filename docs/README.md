@@ -247,3 +247,5 @@ Every feature, the experience it must give and the code, tests and documents beh
 | [115-push-to-talk-coordinator.md](115-push-to-talk-coordinator.md) | Push-to-talk on the call's voice coordinator (press mode): work starts only from the user's words, results are said out of band (2026-10-06) |
 | [116-own-network.md](116-own-network.md) | Linux's own network: its own namespace, connections made by pasta as the Rungic app, so Android and VPN apps treat Linux as the app; a Settings service, on by default (2026-10-06) |
 | [117-media-backend.md](117-media-backend.md) | The microphone, cameras and phone speaker in an independent root media backend, out of the app's process: a call's audio outlives the app; the app keeps permissions, being in front and Android's call (2026-10-06) |
+
+- [118：独立卸载 Rungic](118-standalone-uninstall.md)：只读预览、默认保留家目录、purge 范围及失败报告。

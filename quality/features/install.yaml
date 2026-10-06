@@ -117,6 +117,7 @@ features:
         docs: [docs/92-x70-android-base-end-to-end.md]
     code:
       - tools/ci/standalone.py
+      - tools/ci/install_paths.py
       - tools/ci/test_standalone.py
       - tools/ci/rungic-firstboot.sh
       - tools/ci/rungic-install-service.sh
@@ -131,6 +132,39 @@ features:
       - docs/91-x70-independent-install.md
       - docs/92-x70-android-base-end-to-end.md
       - docs/93-x70-independent-image-revalidation.md
+
+  - id: install.standalone-uninstall
+    title: 明确范围地卸载并保留家目录
+    scenario: install.first-install
+    status: experimental
+    platform: android
+    interfaces: []
+    summary: 开发 ADB 入口默认只读预览，确认后卸载 Rungic；默认原地保留当前 Linux 家目录，显式 purge 才删除。报告区分实际删除、失败、明确保留和未尝试范围。真机重启与重装尚待验收。
+    experience:
+      - id: E1
+        text: 默认及 purge 预览执行全部 root 只读检查，不修改设备；报告逐项状态与当前条件下的阻塞步骤。显式序列号、端口、硬件身份和删除确认齐备才执行；确认删除必须提供新的报告目录。
+      - id: E2
+        text: 默认先在同一 mount ID 内移动 runtime 下的 home 到固定保留目录，持久记录意图，分别确认两端挂载解析成功且 ID 有效，核对 home 原 inode 后才删除 runtime。目标碰撞、跨挂载、解析未知或 home inode 变化时停止；新安装不自动认领资料。
+      - id: E3
+        text: 显式 purge 永久删除当前家目录，并写清后果；历史保留资料、Android、Termux 无关数据和共享文件保留。不会自动改为 purge。
+      - id: E4
+        text: 停止失败、容器状态未知、进程或挂载／mapper／loop 残留时不删除数据。与安装及首启协调，未完成卸载阻止新的安装与运行入口，并在安装器与控制器说明重新运行卸载。新操作尚未改变安装就失败时撤掉阻止标记。
+      - id: E5
+        text: 中断后按持久化源、目标、inode 和状态四项记录恢复；损坏记录、缺失目标或不符状态停止。不存在项可重复处理，不覆盖已保留资料。
+      - id: E6
+        text: 保留有效的空 Magisk product 首启拦截，不修改 Android 镜像；重启后旧种子不得自动重新安装 Rungic。
+        device: 空脚本离线验证不能代替实际固件重启后、不开 App 的真机读回。
+      - id: E7
+        text: 安装与卸载共用受管理路径清单；扫描固定首启及安装器路径，要求明确删除或保留归属。成功或失败都保留可读报告和 JSON，逐项读回删除与保留范围；读回失败不报完成。
+    code:
+      - tools/ci/standalone.py
+      - tools/ci/install_paths.py
+      - tools/ci/test_uninstall.py
+      - tools/ci/uninstall_host_flow_cases.py
+    docs: [docs/118-standalone-uninstall.md]
+    issues:
+      - text: 当前仅有离线文件沙箱与替身边界证据，真实 USB G100 的卸载、重启阻止旧首启、完整重装和手动恢复尚未验收。
+        docs: [docs/118-standalone-uninstall.md]
 
   - id: install.first-run-progress
     title: 首次打开显示真实的准备进度

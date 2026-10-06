@@ -3,6 +3,7 @@
 # Sources are either a verified root-owned independent payload or legacy product.
 set -eu
 set -o pipefail
+[ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; }
 umask 077
 export PATH=/data/adb/magisk:/system/bin:/system/xbin
 seed=${1:-/product/etc/rungic}

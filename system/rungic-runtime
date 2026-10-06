@@ -6,6 +6,7 @@ BASE=/data/adb/rungic-plasma
 STATE=/data/adb/rungic-lxc/runtime/var/lib/lxc/plasma/state/host/runtime
 BB=/data/adb/magisk/busybox
 [ "$(id -u)" = 0 ] || exit 1
+[ "${1:-status}" = stop ] || [ "${1:-status}" = status ] || [ ! -e /data/adb/rungic-uninstalling ] || { echo 'Rungic 卸载未完成，请重新运行卸载。' >&2; exit 1; }
 mkdir -p "$STATE"
 chmod 700 "$STATE"
 log() {

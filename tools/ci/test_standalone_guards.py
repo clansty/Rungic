@@ -10,6 +10,7 @@
   with df answering a chosen free space; the sparse writer records whether it was reached.
 """
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -79,6 +80,9 @@ class ExistingRuntime(unittest.TestCase):
                 if result.returncode:
                     raise subprocess.CalledProcessError(result.returncode, 'sh', result.stdout, result.stderr)
                 return result.stdout.strip()
+
+            def maintenance(self):
+                return nullcontext()
 
             def push(self, local, remote):
                 raise Staging(remote)
