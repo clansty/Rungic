@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 @pytest.fixture(autouse=True)
-def no_device(monkeypatch, tmp_path):
+def no_device(monkeypatch, tmp_path_factory):
     import rungic_device
     import build_on_device
 
@@ -39,9 +39,10 @@ def no_device(monkeypatch, tmp_path):
 
     original_popen = subprocess.Popen
     remote_commands = {'adb', 'ssh', 'scp', 'sftp'}
-    guarded_bin = tmp_path / 'offline-bin'
+    guard_root = tmp_path_factory.mktemp('offline-guard')
+    guarded_bin = guard_root / 'bin'
     guarded_bin.mkdir()
-    violations = tmp_path / 'offline-external-calls'
+    violations = guard_root / 'external-calls'
     for command in remote_commands:
         script = guarded_bin / command
         script.write_text('#!/bin/sh\n'
