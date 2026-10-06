@@ -21,7 +21,8 @@ def runner(tmp_path, monkeypatch):
     def drift(against='origin/main'):
         observed.append(against)
         return {'release': 'installed.1', 'commit': 'installed-sha', 'in_sync': False,
-                'differs': [{'part': 'apk', 'state': 'version differs'}], 'against': against}
+                'differs': [{'part': 'apk', 'state': 'version differs'}], 'against': against,
+                'installed_commit': 'installed-full-sha', 'apk': {'version_code': 1}}
     monkeypatch.setattr(release_tool, 'phone_drift', drift)
     def run(script, *args, **kwargs):
         text = {'getprop ro.serialno': 'TEST-PHONE\n', 'getprop ro.build.fingerprint': 'test/fingerprint\n',
@@ -334,3 +335,118 @@ def test_renderer_labels_missing_performance_reference_and_plan_scope(runner):
     assert '无参考，未比较' in rendered
     assert '本次完整检查计划通过' in rendered
     assert '不包含首次安装、整机重启、长时间待机' in rendered
+
+
+# covers: delivery.acceptance/E6
+@pytest.mark.parametrize('states,manual,state,errors', [
+    (['pass'], [], 'finished', {}), (['fail', 'not-run'], [], 'interrupted', {}),
+    (['pass'], [{'id': 'human', 'status': 'not-run'}], 'finished', {}),
+    (['pass'], [{'id': 'human', 'status': 'fail'}], 'finished', {}),
+    (['skipped'], [], 'finished', {}), (['pass'], [], 'interrupted', {}),
+    (['pass'], [], 'finished', {'device': 'offline'}), ([], [], 'finished', {})])
+def test_attempt_and_combined_verdict_have_one_policy(states, manual, state, errors):
+    report = {'scope': 'full', 'state': state, 'metadata_errors': errors, 'manual_results': manual,
+              'scenarios': [{'id': str(i), 'status': status, 'passed': {'pass': True, 'fail': False}.get(status)}
+                            for i, status in enumerate(states)]}
+    acc.report_summary(report)
+    combined = acc.combine([(Path('report.json'), report)])
+    assert combined['verdict'] == report['verdict']
+    assert combined['reasons'] == report['reasons']
+    assert combined['counts'] == report['counts']
+
+
+# covers: delivery.acceptance/E6
+def test_combination_retains_initial_conditions_and_first_plan_without_mutation():
+    first = {'scope': 'smoke', 'state': 'finished', 'device': {'screen': 'Dozing', 'serial': 'TEST'},
+             'system': {'release': 'fixture'}, 'metadata_errors': {'battery': 'unavailable'},
+             'scenarios': [{'id': 'retry', 'status': 'fail'}, {'id': 'untouched', 'status': 'pass'},
+                           {'id': 'still-fails', 'status': 'fail'}]}
+    retry = {'scope': 'selected', 'state': 'finished', 'device': {'screen': 'Awake', 'serial': 'TEST'},
+             'system': {'release': 'fixture'}, 'scenarios': [{'id': 'retry', 'status': 'pass'}]}
+    for report in (first, retry):
+        report['device']['fingerprint'] = 'test/firmware'
+        report['system'].update(installed_commit='fixed-sha', apk={'version_code': 1})
+    before = json.dumps([first, retry])
+    combined = acc.combine([(Path('first.json'), first), (Path('retry.json'), retry)])
+    assert combined['verdict'] == 'fail' and combined['counts']['fail'] == 1
+    assert combined['counts']['pass'] == 2 and combined['flaky'] == ['retry']
+    assert combined['observed']['untouched']['status'] == 'pass'
+    assert any('首次：' in w and 'Dozing' in w for w in combined['warnings'])
+    assert any('首次：' in w and 'unavailable' in w for w in combined['warnings'])
+    assert not any('重试：' in w and 'Dozing' in w for w in combined['warnings'])
+    assert json.dumps([first, retry]) == before
+    assert '另有 1 项重试才通过' in acc.conclusion_text(combined)
+
+
+# covers: delivery.acceptance/E6
+def test_manual_updates_combine_by_id_and_preserve_unanswered_questions():
+    first = {'scope': 'full', 'state': 'finished', 'scenarios': [{'id': 'automatic', 'status': 'pass'}],
+             'manual_results': [{'id': 'manual.1', 'status': 'fail', 'note': 'first observation'},
+                                {'id': 'manual.2', 'status': 'not-run', 'note': ''}]}
+    update = {'state': 'finished', 'scenarios': [],
+              'manual_results': [{'id': 'manual.1', 'status': 'pass', 'note': 'later observation'}]}
+    for report in (first, update):
+        report.update(device={'serial': 'TEST', 'fingerprint': 'test/firmware'},
+                      system={'release': 'test', 'installed_commit': 'fixed-sha', 'apk': {'version_code': 1}})
+    combined = acc.combine([(Path('full.json'), first), (Path('manual.json'), update)])
+    assert combined['verdict'] == 'incomplete'
+    assert combined['counts']['manual-pass'] == 1 and combined['counts']['manual-not-run'] == 1
+    assert combined['manual'][0]['note'] == 'later observation'
+    assert combined['observed']['automatic']['status'] == 'pass'
+
+
+@pytest.fixture
+def attempts():
+    def report(rows, state='finished'):
+        return {'scope': 'smoke', 'state': state, 'scenarios': rows,
+                'device': {'serial': 'TEST', 'fingerprint': 'test/firmware'},
+                'system': {'release': 'fixture', 'installed_commit': 'fixed-sha', 'apk': {'version_code': 1}}}
+    first = report([{'id': 'A', 'status': 'fail'}, {'id': 'B', 'status': 'pass'}])
+    return first, report([{'id': 'A', 'status': 'pass'}])
+
+
+# covers: delivery.acceptance/E6
+@pytest.mark.parametrize('state', ['not-run', 'skipped', 'unimplemented'])
+def test_missing_retry_observation_cannot_erase_a_known_failure(attempts, state):
+    first, retry = attempts
+    retry['scenarios'][0]['status'] = state
+    retry['state'] = 'interrupted' if state == 'not-run' else 'finished'
+    combined = acc.combine([(Path('first.json'), first), (Path('retry.json'), retry)])
+    assert combined['verdict'] == 'fail'
+    assert combined['observed']['A']['status'] == 'fail'
+    assert combined['counts']['fail'] == 1 and combined['counts']['pass'] == 1
+    assert not combined['flaky']
+    if state == 'not-run':
+        assert any('重试中断' in w for w in combined['warnings'])
+
+
+# covers: delivery.acceptance/E6
+@pytest.mark.parametrize('field', ['serial', 'fingerprint', 'release', 'installed_commit', 'version_code'])
+@pytest.mark.parametrize('missing', [False, True])
+def test_different_or_unknown_installations_cannot_produce_a_combined_pass(attempts, field, missing):
+    first, retry = attempts
+    target = retry['device'] if field in ('serial', 'fingerprint') else retry['system']['apk'] if field == 'version_code' else retry['system']
+    if missing:
+        del target[field]
+    else:
+        target[field] = 'different'
+    combined = acc.combine([(Path('first.json'), first), (Path('retry.json'), retry)])
+    assert combined['verdict'] == 'incomplete'
+    assert combined['reasons'] == ['identity-errors']
+    assert not combined['mergeable'] and not combined['flaky']
+    assert combined['observed']['A']['status'] == 'fail'
+    assert combined['identity_errors']
+
+
+# covers: delivery.acceptance/E6
+def test_render_shows_each_phone_instead_of_claiming_the_second_inherits_the_first_result(runner, catalog):
+    first = acc.run_scenarios([runner.scenario('one', 'bad'), runner.scenario('other')], out_dir=runner.path)
+    second = acc.run_scenarios([runner.scenario('one')], out_dir=runner.path.parent / 'retry', retry_of='../run/report.json')
+    path = Path(second['path'])
+    second['device']['serial'] = 'OTHER-PHONE'
+    path.write_text(json.dumps(second))
+    rendered = acc.render_report(path).read_text()
+    assert '本页合并结论：未完成' in rendered
+    assert '手机序列号不同（TEST-PHONE → OTHER-PHONE）' in rendered
+    assert '首次（TEST-PHONE）' in rendered and '重试（OTHER-PHONE）' in rendered
+    assert '不能合成一台手机的结论' in rendered
