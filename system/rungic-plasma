@@ -157,7 +157,8 @@ desktop_boost() {
 # Linux's own network (docs/116, Settings -> Services): pasta, as the Rungic app's Android uid,
 # makes the connections of the container's own network namespace, and relays the abstract sockets
 # Linux uses to reach Android's services. In the container's mount and PID namespaces (its python,
-# its /proc), Android's network namespace, as root; detached, so it outlives the app's process.
+# its /proc), Android's network namespace, as root; detached, so it outlives the app's process,
+# and without the caller's output pipes, which it would hold open (the app reads them to the end).
 own_network_start() {
     pid= uid=
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -173,7 +174,7 @@ own_network_start() {
     fi
     nsenter -t "$pid" -m -p -- /usr/bin/env PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/setsid -f /bin/sh -c \
       'mkdir -p /var/log/plasma; exec /usr/libexec/rungic-own-network host --app-uid "$1" >>/var/log/plasma/own-network.log 2>&1' \
-      sh "$uid" 9>&- || touch "$HOST_STATE/network-mode.failed"
+      sh "$uid" 9>&- </dev/null >/dev/null 2>&1 || touch "$HOST_STATE/network-mode.failed"
 }
 start_container() {
     # Recreate the shared folder after storage becomes available (including an
