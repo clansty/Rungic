@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""Offline tests never reach the phone. Every device command of these tools goes through
-rungic_device: scripts through _run (adb shell), files and the phone's lookup (`adb devices`,
-getprop) through adb_path(), which every adb command line starts with. Both fail the test here,
-before any process starts. A deploy test once removed the real phone's development overlay through
-a path the test had not stubbed (docs/97); a guard on _run alone let run() ask the real adb for the
-phone first, and push/pull reach it directly."""
+"""Reject device and build-host access in offline tests.
+
+Guard the tool entry points and direct remote commands before process creation.
+Temporary shell scripts can replace remote programs for transport tests.
+Guard failures must escape transfer fallbacks that catch Exception.
+See docs/97 and docs/105 for incidents caused by incomplete test isolation.
+"""
+import os
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,13 +20,67 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 @pytest.fixture(autouse=True)
-def no_device(monkeypatch):
+def no_device(monkeypatch, tmp_path):
     import rungic_device
+    import build_on_device
 
     def refuse(*args, **kwargs):
-        raise AssertionError(f'an offline test reached the device: {list(args[:1])[:3]}')
+        pytest.fail(f'an offline test reached the device: {list(args[:1])[:3]}', pytrace=False)
     monkeypatch.setattr(rungic_device, '_run', refuse)
     # Kept for tests that put a fake adb in RUNGIC_ADB and test how the phone is found
     # (tools/tests/test_rungic_agent_mcp.py); they restore it themselves.
     rungic_device.__dict__.setdefault('_unguarded_adb_path', rungic_device.adb_path)
     monkeypatch.setattr(rungic_device, 'adb_path', refuse)
+
+    def refuse_host(*args, **kwargs):
+        pytest.fail('an offline test reached the build host', pytrace=False)
+    monkeypatch.setattr(build_on_device.MacMini, 'ssh', refuse_host)
+
+    original_popen = subprocess.Popen
+    remote_commands = {'adb', 'ssh', 'scp', 'sftp'}
+    guarded_bin = tmp_path / 'offline-bin'
+    guarded_bin.mkdir()
+    violations = tmp_path / 'offline-external-calls'
+    for command in remote_commands:
+        script = guarded_bin / command
+        script.write_text('#!/bin/sh\n'
+                          f'echo {command} >> {shlex.quote(str(violations))}\n'
+                          'echo "Offline tests cannot run remote commands." >&2\nexit 97\n')
+        script.chmod(0o755)
+    monkeypatch.setenv('PATH', str(guarded_bin) + os.pathsep + os.environ['PATH'])
+
+    def check_command(command, env):
+        if Path(command).name not in remote_commands:
+            return
+        resolved = shutil.which(command, path=env.get('PATH'))
+        if resolved:
+            path = Path(resolved).resolve()
+            # Tests can execute their own temporary shell stand-ins.
+            if (not path.is_relative_to(guarded_bin) and
+                    path.is_relative_to(Path(tempfile.gettempdir()).resolve()) and path.is_file()):
+                with path.open('rb') as source:
+                    if source.read(2) == b'#!':
+                        return
+        pytest.fail(f'an offline test reached an external command: {command}', pytrace=False)
+
+    class OfflinePopen(original_popen):
+        def __init__(self, args, *positional, **kwargs):
+            env = kwargs.get('env') or os.environ
+            argv = shlex.split(args) if isinstance(args, str) else list(args)
+            if argv:
+                check_command(os.fsdecode(argv[0]), env)
+            if kwargs.get('executable'):
+                check_command(os.fsdecode(kwargs['executable']), env)
+            if kwargs.get('shell'):
+                commands = shlex.split(args, comments=True) if isinstance(args, str) else argv
+            elif argv and Path(os.fsdecode(argv[0])).name in {'sh', 'bash', 'dash'} and '-c' in argv:
+                commands = shlex.split(argv[argv.index('-c') + 1], comments=True)
+            else:
+                commands = []
+            for command in commands:
+                check_command(os.fsdecode(command), env)
+            super().__init__(args, *positional, **kwargs)
+    monkeypatch.setattr(subprocess, 'Popen', OfflinePopen)
+    yield violations
+    if violations.exists():
+        pytest.fail('an offline child attempted external commands: ' + violations.read_text().strip(), pytrace=False)

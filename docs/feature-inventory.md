@@ -1211,7 +1211,7 @@ Linux 应用用手机的相机拍照录像，用手机的扬声器和麦克风�
 `delivery.offline-tests` · Linux 系统功能 — tools/run-tests.sh 在开发机上统一运行 pytest、APK 纯 Java 测试和 shell 语法检查，不操作手机。
 
 - **E1** 一条命令跑完全部离线测试（tools/ci、tools、tools/tests、system/account 的 pytest，APK 纯 Java 测试，已跟踪 sh 脚本的语法），最后列出失败的部分或报告全部通过。（单元测试）
-- **E2** 离线测试碰不到手机：任何测试一旦走到 rungic_device 的 adb 调用就直接失败。（单元测试）
+- **E2** 离线测试不访问手机或构建机：设备入口、构建机 SSH 入口和直接 SSH/ADB 命令在启动前失败；临时目录内的脚本替身仍可运行。（单元测试）
 - **E3** 没有 PySide6 时跳过需要它的 QML 测试，并提示 sh tools/dev-setup.sh。（单元测试）
 
 注意：

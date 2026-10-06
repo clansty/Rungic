@@ -20,6 +20,8 @@
 
 `tools/run-tests.sh` 是离线测试的统一入口：pytest 覆盖 `tools/ci`、`tools/`、`tools/tests` 和 `system/account`；另外编译运行 APK 的纯 Java 测试，并检查已跟踪 sh 脚本的语法。没有 PySide6 时会跳过 QML 卡片测试并提示 `sh tools/dev-setup.sh`。`system/account/test_setup.py` 原先在模块顶层调用 `unittest.main()`，导致 pytest 收集中断，已改为 `__main__` 保护。
 
+离线夹具同时拒绝设备入口、构建机 SSH 入口和直接执行的真实 SSH／ADB／SCP／SFTP 命令，报错发生在子进程启动前。拒绝信号不能被传输失败回退的 `except Exception` 吞掉。传输协议测试仍可运行临时目录内的脚本替身；开发包同步测试显式替换构建机暂存步骤，不访问真实构建机。
+
 ## 三个用例
 
 ### UC-account-taken：首装时用户名已被占用

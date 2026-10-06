@@ -249,14 +249,17 @@ class KeptOnBuildHostTests(unittest.TestCase):
             import tarfile
             with tarfile.open(archive) as tar:
                 sent.extend(tar.getnames())
-        saved = (rungic_release.run, rungic_release.fetch_kept, rungic_release.rungic_device.extract_in_container)
+        saved = (rungic_release.run, rungic_release.fetch_kept, rungic_release.rungic_device.extract_in_container,
+                 rungic_release.stage_on_build_host)
         rungic_release.run = run
         rungic_release.fetch_kept = lambda kept, repo: fetched.extend(kept)
         rungic_release.rungic_device.extract_in_container = extract
+        rungic_release.stage_on_build_host = lambda names, pool: {}
         try:
             result = rungic_release.sync_repo(self.pool, '/var/lib/rungic-apt-dev')
         finally:
-            rungic_release.run, rungic_release.fetch_kept, rungic_release.rungic_device.extract_in_container = saved
+            (rungic_release.run, rungic_release.fetch_kept, rungic_release.rungic_device.extract_in_container,
+             rungic_release.stage_on_build_host) = saved
         self.assertEqual(fetched, ['big_1_arm64.deb'])
         self.assertIn('meta_1_all.deb', sent)
         self.assertFalse([n for n in sent if n.endswith('.remote') or n.startswith('big_')])

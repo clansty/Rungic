@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+import build_on_device
 import rungic_device
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,9 +51,47 @@ class NoDeviceTests(unittest.TestCase):
                            ('transport', lambda: rungic_device.transport()),
                            ('from_container', lambda: rungic_device.from_container('/etc/hostname', '/tmp/x'))):
             with self.subTest(name), patch.dict(os.environ, {'RUNGIC_TRANSPORT': ''}):
-                with self.assertRaisesRegex(AssertionError, 'an offline test reached the device'):
+                with self.assertRaisesRegex(pytest.fail.Exception, 'an offline test reached the device'):
                     call()
         self.assertEqual(self.started, [], 'no adb process may start, not even `adb devices`')
+
+    # covers: delivery.offline-tests/E2
+    def test_build_host_errors_cannot_turn_into_a_transfer_fallback(self):
+        with self.assertRaisesRegex(pytest.fail.Exception, 'an offline test reached the build host'):
+            try:
+                build_on_device.MacMini().ssh('true', 1)
+            except Exception:
+                self.fail('The transfer fallback swallowed the offline guard.')
+        self.assertEqual(self.started, [])
+
+    # covers: delivery.offline-tests/E2
+    def test_direct_and_shell_remote_commands_fail_before_start(self):
+        for argv in (['ssh', '-V'], ['/usr/bin/ssh', '-V'], ['adb', 'version'],
+                     ['scp', '-V'], ['sftp', '-V'], ['sh', '-c', 'ssh -V']):
+            with self.subTest(argv=argv), self.assertRaisesRegex(pytest.fail.Exception, 'external command'):
+                subprocess.Popen(argv)
+
+    # covers: delivery.offline-tests/E2
+    def test_temporary_remote_script_can_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'ssh'
+            script.write_text('#!/bin/sh\necho fake-ssh\n')
+            script.chmod(0o755)
+            with subprocess.Popen([str(script)], stdout=subprocess.PIPE, text=True) as process:
+                output, _ = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(output.strip(), 'fake-ssh')
+
+
+# covers: delivery.offline-tests/E2
+def test_child_shell_cannot_hide_a_remote_call_in_a_variable(no_device, tmp_path):
+    script = tmp_path / 'fallback.sh'
+    script.write_text('#!/bin/sh\ntool=ssh\n"$tool" -V 2>/dev/null || true\n')
+    result = subprocess.run(['sh', str(script)], capture_output=True, text=True)
+    assert result.returncode == 0
+    # Consume the expected violation after checking the sentinel's record.
+    assert no_device.read_text().splitlines() == ['ssh']
+    no_device.unlink()
 
 
 @unittest.skipUnless(shutil.which('git'), 'needs git')
