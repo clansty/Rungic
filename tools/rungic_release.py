@@ -35,7 +35,8 @@ pool and a numbering per machine, the APK part of the release.
   rungic_release.py deploy --from FILE  deploy a bundle another machine made (with or without --all)
   rungic_release.py status --all        one row per connected phone: release, channel, commit, behind
                                       origin/main, APK, development overlays, how apt holds the release
-  rungic_release.py drift [--all]       how far a phone is from origin/main, part by part: each project
+  rungic_release.py drift [--all] [--against REF]
+                                      how far a phone is from origin/main, part by part: each project
                                       package and upstream component (its release's or its development
                                       overlay's commit against main's, over the paths it is built from),
                                       the APK's versionCode and every Android-side file; "in sync" or
@@ -1597,9 +1598,13 @@ def phone_status():
             'apt': apt}
 
 
+# What drift compares with: origin/main as fetched, or the commit given with --against.
+DRIFT_REF = 'origin/main'
+
+
 def main_file(path):
-    """A file as origin/main has it (bytes), None where main has none."""
-    result = subprocess.run(['git', 'show', f'origin/main:{path}'], cwd=WORKSPACE, capture_output=True)
+    """A file as DRIFT_REF has it (bytes), None where it has none."""
+    result = subprocess.run(['git', 'show', f'{DRIFT_REF}:{path}'], cwd=WORKSPACE, capture_output=True)
     return result.stdout if result.returncode == 0 else None
 
 
@@ -1608,7 +1613,7 @@ def differing(commit, paths):
     does not have that commit (an overlay built from a branch never fetched here)."""
     if subprocess.run(['git', 'cat-file', '-e', f'{commit}^{{commit}}'], cwd=WORKSPACE, capture_output=True).returncode:
         return None
-    return [f for f in git('diff', '--name-only', commit, 'origin/main', '--', *paths).splitlines() if f]
+    return [f for f in git('diff', '--name-only', commit, DRIFT_REF, '--', *paths).splitlines() if f]
 
 
 # Android-side programs built from source (tools/build_enter.sh) that the host seed installs but a
@@ -1710,16 +1715,34 @@ def phone_drift():
     android = {line.split()[1]: line.split()[0] for line in text.splitlines() if len(line.split()) == 2}
     parts = drift_parts(info, int(code) if code else None, android)
     commit = info.get('commit')
-    behind = git('rev-list', '--count', f'{commit}..origin/main', check=False) if commit else ''
+    behind = git('rev-list', '--count', f'{commit}..{DRIFT_REF}', check=False) if commit else ''
     return {'release': version, 'commit': commit[:12] if commit else None,
             'release_behind_main': int(behind) if behind.isdigit() else None,
             'overlays': len(info.get('dev', {}).get('overrides', {})),
             'in_sync': not parts, 'differs': parts}
 
 
-def drift(every=False):
-    """How far the selected phone, or every connected one, is from origin/main."""
-    git('fetch', '-q', 'origin', 'main', check=False)
+def drift(every=False, against=None):
+    """How far the selected phone, or every connected one, is from origin/main (fetched now; if the
+    fetch fails, the local origin/main, said so) or from the commit `against`."""
+    global DRIFT_REF
+    note = None
+    if against:
+        DRIFT_REF = against
+    else:
+        DRIFT_REF = 'origin/main'
+        try:
+            fetched = subprocess.run(['git', 'fetch', '-q', 'origin', 'main'], cwd=WORKSPACE, capture_output=True,
+                                     text=True, timeout=60).returncode == 0
+        except subprocess.TimeoutExpired:
+            fetched = False
+        if not fetched:
+            note = 'origin/main could not be fetched: compared with the local copy'
+    ref = git('rev-parse', '--verify', f'{DRIFT_REF}^{{commit}}', check=False)
+    if not ref:
+        raise SystemExit(f'drift: no commit {DRIFT_REF} in this repository')
+    when = git('log', '-1', '--format=%cI', ref, check=False)
+    print(f"comparing with {DRIFT_REF} = {ref[:12]} ({when})" + (f"; {note}" if note else ''), flush=True)
     found, others = phones() if every else ([None], [])
     rows = []
     for phone in found:
@@ -1738,15 +1761,16 @@ def drift(every=False):
         if 'error' in row:
             print(f"{label}: {row['error']}", flush=True)
         elif row['in_sync']:
-            print(f"{label}: in sync with origin/main (release {row['release']})", flush=True)
+            print(f"{label}: in sync (release {row['release']})", flush=True)
         else:
-            print(f"{label}: {len(row['differs'])} parts differ from origin/main (release {row['release']}, "
+            print(f"{label}: {len(row['differs'])} parts differ (release {row['release']}, "
                   f"{row['overlays']} overlays)", flush=True)
             for part in row['differs']:
                 where = f" [{part['from']} {part.get('commit', '')}]".rstrip() + ']' if part.get('from') else ''
                 where = where.replace(']]', ']')
                 print(f"  {part['part']}{where}: {part['state']}", flush=True)
-    return {'result': 'ok' if all(r.get('in_sync') for r in rows) else 'drift', 'phones': rows, 'skipped': others}
+    return {'result': 'ok' if all(r.get('in_sync') for r in rows) else 'drift', 'against': ref, 'against_time': when,
+            'note': note, 'phones': rows, 'skipped': others}
 
 
 def status_all():
@@ -1872,6 +1896,7 @@ def main():
     sub.add_parser('commit')
     p = sub.add_parser('status'); p.add_argument('--all', action='store_true', help='every connected Rungic phone')
     p = sub.add_parser('drift'); p.add_argument('--all', action='store_true', help='every connected Rungic phone')
+    p.add_argument('--against', help='compare with this commit instead of origin/main fetched now (no fetch)')
     p = sub.add_parser('dev')
     p.add_argument('--host', choices=['macmini', 'phone'], default=os.environ.get('RUNGIC_BUILD_HOST', 'macmini'),
                    help='where device packages build (default $RUNGIC_BUILD_HOST, else macmini)')
@@ -1916,7 +1941,7 @@ def main():
     elif a.cmd == 'publish':
         result = publish(a.version, a.bundle, a.yes)
     elif a.cmd == 'drift':
-        result = drift(a.all)
+        result = drift(a.all, a.against)
     else:
         result = status_all() if a.all else status()
     print(json.dumps(result, indent=1, ensure_ascii=False))

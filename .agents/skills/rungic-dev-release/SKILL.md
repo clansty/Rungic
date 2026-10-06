@@ -60,7 +60,9 @@ Deployment installs it only when the phone has a lower versionCode.
 5. To learn how far a phone is from main, read `python3 tools/rungic_release.py drift --all`.
    The "commits behind main" count of `status --all` covers only the base release.
    `drift` compares every part with origin/main: each package at its overlay's or release's commit, the APK, and each Android-side file.
-   It prints "in sync" or the parts that differ.
+   It prints "in sync" or the parts that differ, and first the main commit it compares with.
+   If GitHub cannot be reached, the fetch stops after 60 s and drift uses the local origin/main, and says so.
+   Use `--against COMMIT` to compare with a fixed commit, without a fetch.
    It cannot compare built host programs, such as `rungic-plasma-enter`, and a release does not update them.
 
 ## Development overlays
