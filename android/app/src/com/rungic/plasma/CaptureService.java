@@ -35,7 +35,11 @@ public final class CaptureService extends Service {
                 notification.setStyle(Notification.CallStyle.forOngoingCall(new Person.Builder().setName("Agent").build(),hangUp));
             else notification.addAction(new Notification.Action.Builder(null,getString(R.string.agent_call_hang_up),hangUp).build());
         }
-        startForeground(2,notification.build(),types);
+        // The media backend uses the microphone and cameras (docs/117); this is only Android's
+        // notice of it. Android refuses a microphone or camera service started while the app is not
+        // in front: the notice is then left out, never the app's process (a refusal ended it).
+        try { startForeground(2,notification.build(),types); }
+        catch(RuntimeException e) { android.util.Log.w("RungicMedia","capture notification refused",e);stopSelf(); }
         return START_NOT_STICKY;
     }
     @Override public IBinder onBind(Intent intent) { return null; }

@@ -97,3 +97,15 @@
   - smoke 9/9。
 - 安装 APK 2.28 后重新打开，smoke 9/9（`.work/acceptance/20260930.9/20260930-213913/`）。`.9` 的 snapshot 仍保留，接受后再执行 `rungic_release.py commit`。
 - **教训**：经 Wi-Fi 部署整套发布会超过 10 分钟，不要给 `rungic_release.py deploy` 套短超时，要放在后台运行。
+
+## 回到前台不再重走启动（2026-10-06，APK 2.43，task #27）
+
+Kevin 问：App 从安卓后台回来为什么有一段黑屏加载。原因：安卓在 App 进后台时销毁它的画面层，回来时重建；App 把重建当成新启动，先挂“正在启动桌面”的加载页，再同步调 `rungic-plasma start`（su，G100 S 上 1.7–7.7 秒，有一次光检查安卓音频就 2.7 秒），之后才请求桌面的下一帧。会话早已不依赖 App（见上文），这一步在回前台时只剩开销。
+
+现在：
+- 同一个 App 进程里回到前台（Wayland 连接已建立）时，先盖上 onPause 时用 PixelCopy 留下的上一帧（半分辨率）；
+- 立即请求下一帧；
+- `rungic-plasma start` 改在后台线程里跑，作为检查和兜底：它照旧会重启失败的会话、拉起停了的后台；
+- 冷启动（新进程）不变。
+
+实测（G100 S，后台 5–8 秒后回来，四次）：从画面层重建到桌面新帧 58–155 ms，以前约 2 秒。日志 `RungicWayland: desktop frame N ms after the surface`。

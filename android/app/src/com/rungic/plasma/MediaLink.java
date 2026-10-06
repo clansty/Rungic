@@ -170,6 +170,9 @@ final class MediaLink implements Closeable {
      *  it: started when it can, so only on a change. */
     private void service(boolean microphone,boolean camera,boolean call) {
         if(microphone==serviceMicrophone && camera==serviceCamera && call==serviceCall)return;
+        // Started from behind (the app came back while the backend was recording), Android refuses
+        // it; a call's is started while the desktop is in front, when the call starts.
+        if((microphone || camera) && !visible && !call && !serviceMicrophone && !serviceCamera)return;
         serviceMicrophone=microphone;serviceCamera=camera;serviceCall=call;
         activity.runOnUiThread(() -> {
             try {
