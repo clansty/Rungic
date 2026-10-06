@@ -205,6 +205,58 @@ class DeployTests(Workspace):
             p.start()
             self.addCleanup(p.stop)
 
+    # R15-R17: deployment policy stays compatible while both observations survive.
+    # covers: delivery.release-deploy/E6 delivery.acceptance/E6
+    def test_acceptance_attempts_preserve_first_failure_and_retry_without_changing_policy(self):
+        import rungic_acceptance as acc
+        self.stub(rootfs_state=lambda: ('directory', 'none'))  # isolate reporting from snapshot evidence
+        for retry_status, retry_passed, expected in [('pass', True, 'ok'), ('fail', False, 'verify-failed'),
+                                                      ('skipped', True, 'ok')]:
+            with self.subTest(retry=retry_status):
+                initial = {'passed': False, 'failed_ids': ['A'], 'verdict': 'fail', 'release': self.info['version'],
+                           'scenarios': [{'id': 'A', 'passed': False, 'status': 'fail'}], 'path': 'initial/report.json'}
+                retry = {'passed': retry_passed, 'failed_ids': ['A'] if retry_status == 'fail' else [],
+                         'verdict': 'incomplete' if retry_status == 'skipped' else retry_status,
+                         'scenarios': [{'id': 'A', 'passed': retry_passed if retry_status != 'skipped' else None,
+                                        'status': retry_status}], 'path': 'retry/report.json', 'release': self.info['version']}
+                with patch.object(acc, 'run_level', return_value=initial), patch.object(acc, 'run_scenarios', return_value=retry) as retried, \
+                     patch.object(acc, 'load', return_value={'scenarios': [{'id': 'A'}]}):
+                    log = rungic_release.deploy('20261001.2', snapshot='never', record_label=f'retry-{retry_status}')
+                self.assertEqual(log['result'], expected)
+                self.assertEqual(log['attempts'], ['acceptance/report.json', 'acceptance-retry/report.json'])
+                self.assertEqual(retried.call_args.kwargs['retry_of'], '../acceptance/report.json')
+                self.assertEqual(log['flaky'], ['A'] if retry_status == 'pass' else [])
+                self.assertFalse(initial['passed'])
+                self.assertEqual(json.loads(rungic_release.RELEASE_HISTORY.read_text())[-1]['flaky'], log['flaky'])
+                self.assertEqual(json.loads(rungic_release.HISTORY.read_text())[-1]['flaky'], log['flaky'])
+
+    # R15: actual deployment and runner write separate evidence, not just summary flags.
+    # covers: delivery.release-deploy/E6 delivery.acceptance/E6
+    def test_real_runner_keeps_both_files_and_links_retry_to_initial(self):
+        import rungic_acceptance as acc
+        self.stub(rootfs_state=lambda: ('directory', 'none'), git=lambda *args, **kw: 'a' * 40 if args[0] == 'rev-parse' else '',
+                  phone_drift=lambda against: {'release': self.info['version'], 'against': against, 'in_sync': True})
+        observations = iter([False, True])
+        plan = {'scenarios': [{'id': 'A', 'title': 'observable result', 'check': 'fixture', 'level': 'smoke',
+                               'screenshot_on_failure': False}], 'manual': ['real speech']}
+        with patch.object(acc, 'load', return_value=plan), \
+             patch.object(acc, 'device_snapshot', return_value={'serial': 'fixture-phone', 'fingerprint': 'fixture'}), \
+             patch.object(acc, 'bring_to_front', return_value={'in_front': True}), \
+             patch.object(acc, 'previous_report', return_value=(None, None)), \
+             patch.dict(acc.CHECKS, fixture=lambda ctx: acc.result(next(observations))):
+            log = rungic_release.deploy('20261001.2', snapshot='never')
+        self.assertEqual(log['result'], 'ok')
+        record = next(rungic_release.DEPLOY.glob('*-20261001.2'))
+        initial = json.loads((record / log['attempts'][0]).read_text())
+        retry = json.loads((record / log['attempts'][1]).read_text())
+        self.assertEqual(initial['verdict'], 'fail')
+        self.assertFalse(initial['scenarios'][0]['passed'])
+        self.assertEqual(retry['verdict'], 'pass')
+        self.assertTrue(retry['scenarios'][0]['passed'])
+        self.assertEqual((record / log['attempts'][1]).parent.joinpath(retry['retry_of']).resolve(),
+                         (record / log['attempts'][0]).resolve())
+        self.assertEqual(log['flaky'], ['A'])
+
     def dmesg(self, script):
         return Result(f'{self.ext4.pop(0)}\n')
 

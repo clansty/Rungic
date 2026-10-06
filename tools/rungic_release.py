@@ -931,7 +931,7 @@ def deploy(version=None, restart='auto', acceptance='smoke', record_label=None, 
     info = next((r for r in releases() if r['version'] == log.get('version')), {})
     remember({'time': datetime.datetime.now().astimezone().isoformat(timespec='seconds'), 'version': log.get('version'),
               'commit': info.get('commit'), 'channel': info.get('channel', 'release'), 'serial': serial,
-              'result': log.get('result')})
+              'result': log.get('result'), 'flaky': log.get('flaky', [])})
     return log
 
 
@@ -946,7 +946,7 @@ def deploy_release(version=None, restart='auto', acceptance='smoke', record_labe
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     record = DEPLOY / f'{stamp}-{record_label or version}'
     record.mkdir(parents=True)
-    log = {'version': version, 'started': stamp, 'steps': []}
+    log = {'version': version, 'started': stamp, 'steps': [], 'attempts': [], 'flaky': []}
     started_at = time.time()
 
     def step(name, **data):
@@ -1108,21 +1108,32 @@ def deploy_release(version=None, restart='auto', acceptance='smoke', record_labe
         passed = not mismatch
         if acceptance != 'none':
             import rungic_acceptance
-            report = rungic_acceptance.run_level(acceptance, release=version, out_dir=record / 'acceptance',
-                                               since=installed_at)
+            def attempt(kind, directory, execute):
+                # Each report is the source of truth. Keep only relative paths in the deploy record.
+                path = str((directory / 'report.json').relative_to(record))
+                log['attempts'].append(path)
+                step('acceptance-start', kind=kind, path=path)
+                try:
+                    return execute()
+                finally:
+                    step('acceptance-record', kind=kind, path=path)
+
+            report = attempt('initial', record / 'acceptance', lambda: rungic_acceptance.run_level(
+                acceptance, release=version, out_dir=record / 'acceptance', since=installed_at))
             step('acceptance', level=acceptance, passed=report['passed'], failed=report['failed_ids'])
-            flaky = []
-            if not report['passed']:
-                # One retry of the failed scenarios: a pass on retry is recorded as flaky, not a failure.
+            accepted = report['passed']  # deployment's existing rollback policy is unchanged
+            if not accepted and report['failed_ids']:
                 spec = rungic_acceptance.load()
-                retry = rungic_acceptance.run_scenarios([s for s in spec['scenarios'] if s['id'] in report['failed_ids']],
-                                                      release=version, out_dir=record / 'acceptance-retry',
-                                                      since=installed_at)
-                flaky = [i for i in report['failed_ids'] if i not in retry['failed_ids']]
-                step('acceptance-retry', passed=retry['passed'], failed=retry['failed_ids'], flaky=flaky)
-                report = {**report, 'passed': retry['passed']}
-            log['flaky'] = flaky
-            passed = passed and report['passed']
+                retry = attempt('retry', record / 'acceptance-retry', lambda: rungic_acceptance.run_scenarios(
+                    [s for s in spec['scenarios'] if s['id'] in report['failed_ids']],
+                    release=version, out_dir=record / 'acceptance-retry', since=installed_at,
+                    retry_of='../acceptance/report.json'))
+                # A missing or skipped check is not a successful retry.
+                log['flaky'] = [row['id'] for row in retry['scenarios']
+                                if row['id'] in report['failed_ids'] and row['passed'] is True]
+                step('acceptance-retry', passed=retry['passed'], failed=retry['failed_ids'], flaky=log['flaky'])
+                accepted = retry['passed']
+            passed = passed and accepted
     except (Exception, SystemExit) as failure:
         # Anything that stops a deploy after the snapshot returns to it, like a failed verification.
         error = f'{type(failure).__name__}: {failure}'
@@ -1147,7 +1158,7 @@ def deploy_release(version=None, restart='auto', acceptance='smoke', record_labe
     step('done', result=log['result'])
     entries = history()
     entries.append({'time': stamp, 'version': version, 'previous': previous, 'result': log['result'],
-                    'record': str(record.relative_to(WORKSPACE))})
+                    'record': str(record.relative_to(WORKSPACE)), 'flaky': log['flaky']})
     HISTORY.write_text(json.dumps(entries, indent=1) + '\n')
     return log
 
@@ -1598,22 +1609,17 @@ def phone_status():
             'apt': apt}
 
 
-# What drift compares with: origin/main as fetched, or the commit given with --against.
-DRIFT_REF = 'origin/main'
-
-
-def main_file(path):
-    """A file as DRIFT_REF has it (bytes), None where it has none."""
-    result = subprocess.run(['git', 'show', f'{DRIFT_REF}:{path}'], cwd=WORKSPACE, capture_output=True)
+def main_file(path, against='origin/main'):
+    """A file as the explicit comparison ref has it (bytes), None where it has none."""
+    result = subprocess.run(['git', 'show', f'{against}:{path}'], cwd=WORKSPACE, capture_output=True)
     return result.stdout if result.returncode == 0 else None
 
 
-def differing(commit, paths):
-    """The files under `paths` that differ between `commit` and origin/main; None when this repository
-    does not have that commit (an overlay built from a branch never fetched here)."""
+def differing(commit, paths, against='origin/main'):
+    """Compare the files under `paths` between `commit` and `against`. Return None if this repository does not contain `commit`."""
     if subprocess.run(['git', 'cat-file', '-e', f'{commit}^{{commit}}'], cwd=WORKSPACE, capture_output=True).returncode:
         return None
-    return [f for f in git('diff', '--name-only', commit, DRIFT_REF, '--', *paths).splitlines() if f]
+    return [f for f in git('diff', '--name-only', commit, against, '--', *paths).splitlines() if f]
 
 
 # Android-side programs built from source (tools/build_enter.sh) that the host seed installs but a
@@ -1622,27 +1628,26 @@ BUILT_HOST_PROGRAMS = {'/data/adb/rungic-plasma/rungic-plasma-enter': 'tools/run
                        '/data/adb/rungic-lxc/rungic-lxc-enter': 'tools/rungic_lxc_enter.c'}
 
 
-def android_files():
-    """origin/main's Android-side files: {path on the phone: source}, the release's (packages.json
+def android_files(against='origin/main'):
+    """The comparison ref's Android-side files: {path on the phone: source}, the release's (packages.json
     "android") and the host seed's (tools/ci/build_host_seed.py), which a release does not update."""
-    files = {e['path']: e['source'] for e in json.loads(main_file('release/packages.json') or b'{}').get('android', [])}
-    seed = (main_file('tools/ci/build_host_seed.py') or b'').decode()
+    files = {e['path']: e['source'] for e in json.loads(main_file('release/packages.json', against) or b'{}').get('android', [])}
+    seed = (main_file('tools/ci/build_host_seed.py', against) or b'').decode()
     for source, dest in re.findall(r'\(\s*"([^"]+)",\s*"([^"]+)",\s*0o\d+\s*\)', seed):
         if not source.startswith(('lxc_', 'plasma_')):
             files.setdefault('/data/adb/' + dest, source)
-    cast = (main_file('tools/cast_payload.py') or b'').decode()
+    cast = (main_file('tools/cast_payload.py', against) or b'').decode()
     for source, dest in re.findall(r'\(\s*\'([^\']+)\',\s*\'([^\']+)\',\s*0o\d+\s*\)', cast):
         files.setdefault('/data/adb/rungic-wfd/' + dest, source)
     # Built artifacts (the cast JAR, the entry programs) are named, not paths: not compared here.
     return {path: source for path, source in files.items() if '/' in source}
 
 
-def drift_parts(info, apk_code, android):
-    """The parts of a phone that differ from origin/main. `info` is its release.json, `apk_code` its
+def drift_parts(info, apk_code, android, against='origin/main'):
+    """The parts of a phone that differ from the explicit comparison ref. `info` is its release.json, `apk_code` its
     APK's versionCode, `android` {path: sha256 or None} of the Android-side files on it.
-    Each project package and upstream component is compared at the commit it came from: its
-    development overlay's (docs/97) or else the release's, over what it is built from
-    (rungic_package.identity_paths, component paths). Content, not ancestry: squash merges leave a
+    Compare each project package and upstream component at its development overlay commit (docs/97), or else its release commit.
+    Use the package input paths (rungic_package.identity_paths and component paths). Content, not ancestry: squash merges leave a
     merged branch's commits outside main."""
     import pq
     import rungic_package
@@ -1655,7 +1660,7 @@ def drift_parts(info, apk_code, android):
             return set()
     base = info.get('commit')
     overrides = info.get('dev', {}).get('overrides', {})
-    main_spec = json.loads(main_file('release/packages.json') or b'{}')
+    main_spec = json.loads(main_file('release/packages.json', against) or b'{}')
     definitions = rungic_package.definitions()
     parts = []
     for name in sorted(main_spec.get('project', {})):
@@ -1675,48 +1680,51 @@ def drift_parts(info, apk_code, android):
         if not commit:
             found.append({'part': name, 'from': source, 'state': 'unknown commit'})
             continue
-        files = differing(commit, paths)
+        files = differing(commit, paths, against)
         if files is None:
             found.append({'part': name, 'from': source, 'commit': commit[:12], 'state': 'commit not in this repository'})
         elif files or (override or {}).get('dirty'):
             found.append({'part': name, 'from': source, 'commit': commit[:12],
                           'state': f'{len(files)} files differ' + (', built from uncommitted changes' if override.get('dirty') else '')
                           if override else f'{len(files)} files differ', 'files': files[:6]})
-    manifest = (main_file('android/app/AndroidManifest.xml') or b'').decode()
+    manifest = (main_file('android/app/AndroidManifest.xml', against) or b'').decode()
     main_code = re.search(r'versionCode="(\d+)"', manifest)
     main_code = int(main_code.group(1)) if main_code else None
     if apk_code != main_code:
         found.append({'part': 'apk', 'state': f'versionCode {apk_code} on the phone, {main_code} on main'})
     release_paths = {e['path'] for e in main_spec.get('android', [])}
-    for path, source in android_files().items():
-        content = main_file(source)
+    for path, source in android_files(against).items():
+        content = main_file(source, against)
         want = hashlib.sha256(content).hexdigest() if content is not None else None
         have = android.get(path)
         if have != want and not (have is None and path not in release_paths):
             state = 'missing on the phone' if have is None else 'not on main' if want is None else 'differs from main'
             found.append({'part': path, 'state': state + ('' if path in release_paths else ' (host seed only: a release does not update it)')})
     for path, source in BUILT_HOST_PROGRAMS.items():
-        if base and differing(base, [source]):
+        if base and differing(base, [source], against):
             found.append({'part': path, 'state': f'cannot compare a built program; {source} changed since the '
                           "phone's release, and a release does not update it"})
     return found
 
 
-def phone_drift():
+def phone_drift(against='origin/main'):
     """drift of the selected phone (see drift_parts)."""
     version, info = device_release()
     if not info:
         raise SystemExit('the phone has no Rungic release (release.json)')
     _name, code = installed_apk()
-    main_spec = json.loads(main_file('release/packages.json') or b'{}')
-    paths = list(android_files())
+    if main_file('release/packages.json', against) is None:
+        raise SystemExit(f'cannot read release/packages.json from comparison {against}')
+    paths = list(android_files(against))
     text = run('for f in ' + ' '.join(shlex.quote(p) for p in paths) + '; do [ -f "$f" ] && sha256sum "$f"; done; true',
-               'root', timeout=60, check=False).stdout or ''
+               'root', timeout=60, check=True).stdout or ''
     android = {line.split()[1]: line.split()[0] for line in text.splitlines() if len(line.split()) == 2}
-    parts = drift_parts(info, int(code) if code else None, android)
+    parts = drift_parts(info, int(code) if code else None, android, against)
     commit = info.get('commit')
-    behind = git('rev-list', '--count', f'{commit}..{DRIFT_REF}', check=False) if commit else ''
+    behind = git('rev-list', '--count', f'{commit}..{against}', check=False) if commit else ''
     return {'release': version, 'commit': commit[:12] if commit else None,
+            'against': against, 'installed_commit': commit, 'apk': {'name': _name, 'version_code': code},
+            'development': info.get('dev', {}),
             'release_behind_main': int(behind) if behind.isdigit() else None,
             'overlays': len(info.get('dev', {}).get('overrides', {})),
             'in_sync': not parts, 'differs': parts}
@@ -1725,12 +1733,9 @@ def phone_drift():
 def drift(every=False, against=None):
     """How far the selected phone, or every connected one, is from origin/main (fetched now; if the
     fetch fails, the local origin/main, said so) or from the commit `against`."""
-    global DRIFT_REF
     note = None
-    if against:
-        DRIFT_REF = against
-    else:
-        DRIFT_REF = 'origin/main'
+    comparison = against or 'origin/main'
+    if not against:
         try:
             fetched = subprocess.run(['git', 'fetch', '-q', 'origin', 'main'], cwd=WORKSPACE, capture_output=True,
                                      text=True, timeout=60).returncode == 0
@@ -1738,17 +1743,17 @@ def drift(every=False, against=None):
             fetched = False
         if not fetched:
             note = 'origin/main could not be fetched: compared with the local copy'
-    ref = git('rev-parse', '--verify', f'{DRIFT_REF}^{{commit}}', check=False)
+    ref = git('rev-parse', '--verify', f'{comparison}^{{commit}}', check=False)
     if not ref:
-        raise SystemExit(f'drift: no commit {DRIFT_REF} in this repository')
+        raise SystemExit(f'drift: no commit {comparison} in this repository')
     when = git('log', '-1', '--format=%cI', ref, check=False)
-    print(f"comparing with {DRIFT_REF} = {ref[:12]} ({when})" + (f"; {note}" if note else ''), flush=True)
+    print(f"comparing with {comparison} = {ref[:12]} ({when})" + (f"; {note}" if note else ''), flush=True)
     found, others = phones() if every else ([None], [])
     rows = []
     for phone in found:
         def one():
             try:
-                return phone_drift()
+                return phone_drift(ref)
             except (Exception, SystemExit) as failure:
                 return {'error': f'{type(failure).__name__}: {failure}'[:200]}
         if phone:

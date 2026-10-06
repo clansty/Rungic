@@ -406,7 +406,7 @@ features:
           - {doc: docs/61-delivery-diagnostics-plan.md, date: 2026-09-26, note: "8 项约 70 秒"}
           - {doc: docs/94-build-fingerprints.md, date: 2026-09-30, note: "G100 9 项 smoke 全部通过"}
       - id: E2
-        text: 失败的场景自动重跑一次，重跑通过的记为 flaky，不算失败。
+        text: 失败的场景自动重跑一次，确实重跑通过的记为 flaky，不算部署失败；首次失败和重试结果分别保留，跳过不能算重试通过。
         evidence:
           - {doc: docs/61-delivery-diagnostics-plan.md, date: 2026-09-26, note: "20260926.12 冒烟 8 项一次通过（无 flaky）"}
       - id: E3
@@ -418,7 +418,7 @@ features:
       - id: E5
         text: 部署和验收期间出现已知签名以外的崩溃即失败。安装之前发生的崩溃不算到新发布上。
       - id: E6
-        text: 报告写到 .work/acceptance/<发布>/<时间>/report.json，并列出自动结果不能替代的人工项（画质、声学、音画同步、拼音手感、投屏）。
+        text: 报告写到 .work/acceptance/<发布>/<时间>/report.json，记录实际版本、设备、完整计划、结果和未测范围。中断也留报告，不覆盖已有证据；render 生成可读报告并保留首次失败。smoke 列出人工未覆盖项，full 缺少真人结果时不算完整通过。
     pitfalls:
       - text: 验收前先看 dumpsys input 的 touchingPointers 为空：一次屏幕右下持续的实体触摸让注入的滑动成了多指手势，快捷设置拉不下来。
         docs: [docs/73-reduce-upstream-changes.md]
@@ -433,6 +433,7 @@ features:
       - release/acceptance.json
       - tools/tests/test_acceptance_scenarios.py
       - tools/tests/test_acceptance_restore.py
+      - tools/tests/test_acceptance_report.py
     docs: [docs/61-delivery-diagnostics-plan.md]
 
   - id: delivery.build-fingerprint

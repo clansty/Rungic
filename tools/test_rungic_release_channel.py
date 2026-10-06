@@ -528,8 +528,8 @@ class Drift(unittest.TestCase):
                        for n in ('rungic-a', 'rungic-b')}
         import pq
         import rungic_package
-        with patch.object(rungic_release, 'main_file', main.get), \
-             patch.object(rungic_release, 'differing', lambda commit, paths: differ(commit, paths)), \
+        with patch.object(rungic_release, 'main_file', lambda path, against='origin/main': main.get(path)), \
+             patch.object(rungic_release, 'differing', lambda commit, paths, against='origin/main': differ(commit, paths)), \
              patch.object(rungic_package, 'definitions', lambda: definitions), \
              patch.object(pq, 'overlay', lambda name: {}):
             return rungic_release.drift_parts(info, apk, android)
@@ -563,3 +563,36 @@ class Drift(unittest.TestCase):
                            lambda c, p: None if c == 'elsewhere' else [])
         self.assertEqual(found, [{'part': 'rungic-a', 'from': 'overlay', 'commit': 'elsewhere',
                                   'state': 'commit not in this repository'}])
+
+    # R19/R20: compare refs are per call; failed reads cannot fabricate an in-sync phone.
+    # covers: delivery.dev-channel/E9 delivery.acceptance/E6
+    def test_phone_drift_uses_each_explicit_ref_without_global_state(self):
+        import rungic_package
+        import pq
+        seen = []
+        def contents(path, against='origin/main'):
+            seen.append(against)
+            files = {'release/packages.json': b'{"android": [], "project": {"rungic-a": {}}}',
+                     'android/app/AndroidManifest.xml': b'<manifest android:versionCode="91">'}
+            return files.get(path)
+        def difference(commit, paths, against='origin/main'):
+            seen.append(against)
+            return ['src/rungic-a/changed'] if against == 'Y' else []
+        definition = {'rungic-a': {'paths': ['src/rungic-a'], 'dir': rungic_release.WORKSPACE / 'packaging/rungic-a'}}
+        with patch.object(rungic_release, 'device_release', return_value=('installed.1', {'commit': 'base'})), \
+             patch.object(rungic_release, 'installed_apk', return_value=('2.43', '91')), \
+             patch.object(rungic_release, 'main_file', side_effect=contents), \
+             patch.object(rungic_release, 'differing', side_effect=difference), \
+             patch.object(rungic_release, 'run', return_value=Result()), \
+             patch.object(rungic_release, 'git', return_value='0'), \
+             patch.object(rungic_package, 'definitions', return_value=definition), \
+             patch.object(pq, 'overlay', return_value={}):
+            for reference in ['X', 'Y', 'X']:
+                seen.clear()
+                row = rungic_release.phone_drift(reference)
+                self.assertEqual(set(seen), {reference})
+                self.assertEqual(row['against'], reference)
+                self.assertEqual(row['in_sync'], reference == 'X')
+            with patch.object(rungic_release, 'main_file', return_value=None):
+                with self.assertRaisesRegex(SystemExit, 'cannot read'):
+                    rungic_release.phone_drift('missing')

@@ -330,3 +330,32 @@ rootfs从目录迁入ext4镜像，升级前自动建立dm-snapshot；btrfs按第
   - 端到端：容器内 `rungic-platform --request '{"op":"container-memory"}'` 经平台桥、APK 和控制器返回新字段（程序 681、文件缓存 1085，其中内存文件 260，swap 988 MiB）。面板界面本身未截图，由离线测试覆盖。
   - 回退：装回备份的控制器，再写 `memory.memsw.limit_in_bytes=-1` 和 `memory.swappiness=100`；`rungic_dev.py reset rungic-plasma-bridges`。
 - **为什么不另加磁盘 swap**：Moto 自带的"内存扩展"在用。2026-10-03 同一台 G100 S 只读读取：zram0 由厂商 zram 模块提供 hybridswap（`/sys/block/zram0/hybridswap_*`），`hybridswap_enable` 为 `hybridswap enable out_to_eswap enable swapd enable`，后备设备 `/dev/block/loop50`（/data 上的文件）；`hybridswap_meminfo` 显示 eswap 总量约 683 MiB、已用 133 MiB（原始 351 MiB），`hybridswap_stat_snap` 累计写出 5326 批、读回 5727 次，失败记录 0。它不依赖内核配置里的 `CONFIG_ZRAM_WRITEBACK`（该项在当前自建内核 `6.6.87-android15-8-maybe-dirty-4k` 里未开，但厂商模块自带写出机制）。另挂一个全局 swapfile 会与它和 lmkd（`swap_free_low_percentage=10`）的判断相互影响，并增加闪存写入，暂不加。
+
+## 验收报告：范围、现场与每次观察
+
+`tools/rungic_acceptance.py` 在接触设备之前，先保存完整的本次自动计划，每项初始为 `not-run`。场景结束后原子更新同一份 `report.json`；中断留下已执行结果和仍未执行的项。已有报告的目录拒绝再次使用，避免覆盖证据。
+
+报告记录实际安装的 release、APK、开发覆盖和各部分差异，使用运行工具的固定源码提交作对比，不在运行中重新拉取 main。`device` 记录手机序列号、固件指纹、电量、供电状态和采集时的屏幕状态；`front` 是随后拉起应用的结果。采集失败显示未知并保留错误，不把未知写成零电量、未充电或版本一致。
+
+`verdict` 有三个值：有自动或人工失败为 `fail`；没有失败，但自动项跳过、未实现、未执行、现场采集失败或运行未完成，为 `incomplete`；本次计划全部完成且通过才为 `pass`。命令退出码分别是 1、2、0。原 `passed`、`complete` 保留原有自动检查语义，部署的回滚判断继续使用 `passed`；它们不能替代 `verdict` 或发布决定。
+
+`smoke` 只执行冒烟自动计划，列出人工未覆盖范围。`full` 执行完整自动计划，并要求人工结果；人工未填写时仍是 `incomplete`。人工 ID 对应 `release/acceptance.json` 的 `manual` 顺序（`manual.1` 起）。结果必须来自实际观察，例如：
+
+```sh
+python3 tools/rungic_acceptance.py full --release VERSION \
+  --manual 'manual.1=pass:检查了本次实际显示、拍照和录屏画面，未发现缺损'
+```
+
+未填写的其他人工项仍待验。非法状态、未知或重复 ID、缺少观察说明会拒绝执行。独立选场景时，未知 ID 或空选择也拒绝执行。
+
+部署的 `deploy.json` 用 `attempts` 按时间保存报告相对路径：`acceptance/report.json`、`acceptance-retry/report.json`。重试报告通过 `retry_of` 关联首次报告；首次结果不被重试覆盖。只有首次失败、重试确实通过的项列入 `flaky`，跳过不能算重试通过。这个字段也写入本机和已提交的部署历史；原 `result` 枚举保留，供回滚及多设备汇总使用。
+
+```sh
+python3 tools/rungic_acceptance.py render .work/deploy/RUN/acceptance-retry/report.json
+```
+
+命令不访问设备，也不修改原 JSON，写出同目录 `report.md`。报告回答实际测试现场、检查观察到什么、关联的用户能力、首次与重试、缺口、指标和结论。首次文件缺失会明确显示；人工待验、接口应答和真机操作分开。功能名和关联来自当前仓库的验收计划与质量清单，关联本身不表示整条体验要求都经过验证。全部退役的用户场景不计入当前缺口。
+
+正文还列出同一版本与手机的、更早的已提交部署结果。这只能说明历史部署观察，不能证明安装内容完全相同。指标比较注明参考手机与固件；没有参考的合成器性能显示“无参考，未比较”。
+
+`full` 全部通过仅表示本次完整检查计划通过；现有自动和人工计划不包含首装、整机重启或过夜长稳。它不能单独证明整版可以发布。生命周期验收从兼容 Android 已装好、尚无 Rungic 开始，另外保留连续流程证据；刷机是这一轮的前置准备，不计入测试结论。
